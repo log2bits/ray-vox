@@ -3,7 +3,7 @@ mod sort;
 
 use crate::types::{BitpackedArray, Lut};
 
-pub const DELETE: u32 = u32::MAX;
+pub const DELETE: u32 = 0;
 
 // Each byte is 1..=64 (slot index + 1). Trailing 0s are unused.
 // depth() = number of filled bytes = how far down the tree this edit reaches.

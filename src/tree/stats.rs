@@ -145,9 +145,9 @@ fn geo_svo_bytes<const DEPTH: usize>(levels: &[Level], d: usize, node: u32, bpn:
 		let s    = mask.trailing_zeros() as usize;
 		let rank = (occ & ((1u64 << s) - 1)).count_ones();
 		if (leaf >> s) & 1 != 0 {
-			// ESVO leaf: in a plain SVO this expands to a full subtree of 64^k nodes per level.
+			// One leaf at level d expands to: 1 node at d+1, 64 at d+2, 64^2 at d+3, ...
 			for depth_below in 1..=(DEPTH - d - 1) {
-				total += 64usize.pow(depth_below as u32) * bpn[d + depth_below];
+				total += 64usize.pow((depth_below - 1) as u32) * bpn[d + depth_below];
 			}
 		} else {
 			let child = level.node_children.get(base + rank);

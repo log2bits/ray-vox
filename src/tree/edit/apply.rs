@@ -46,7 +46,7 @@ impl<const DEPTH: usize> Tree<DEPTH> {
 		if let Some(&(_, _, val)) = edits.iter().rfind(|(_, d, _)| *d == 0) {
 			self.occupied = val != DELETE;
 			self.is_leaf = val != DELETE;
-			self.value = if val != DELETE { val } else { 0 };
+			self.value = val;
 			return;
 		}
 

@@ -17,12 +17,26 @@ pub enum Coverage {
 	Empty,
 }
 
+/// A write-only shape. `coverage` is a pure function of geometry — no tree reads.
+/// These are evaluated in parallel across chunks during `generate_chunk`.
+/// All edit sources ultimately resolve to an `EditPacket` before being applied to the tree.
 pub trait Shape: Send + Sync {
 	fn aabb(&self) -> Aabb;
 	// lod: 0 = single voxel, n = node covers 4^n voxels per side.
 	fn coverage(&self, node_aabb: Aabb, lod: u8) -> Coverage;
 }
 
+/// A read+write shape. Can query the current tree state during coverage evaluation,
+/// enabling edits that depend on previously-applied edits (e.g. topsoiling after terrain).
+/// Applied sequentially after all write-only shapes in the same stage are flushed.
+/// Not yet implemented.
+pub trait ContextShape: Send + Sync {
+	fn aabb(&self) -> Aabb;
+	// TODO: coverage_with_ctx(&self, node_aabb: Aabb, lod: u8, tree: &Tree) -> Coverage
+	// Needs a type-erased tree reference; design TBD when implementing read+write edits.
+}
+
+/// Runs the coverage walk for a write-only shape, producing a sorted `EditPacket`.
 pub fn edit_packet_for_shape<const DEPTH: usize>(
 	shape: &dyn Shape,
 	root_aabb: Aabb,
@@ -44,6 +58,14 @@ pub fn edit_packet_for_shape<const DEPTH: usize>(
 	collect_shape_edits(shape, shape_aabb, root_aabb, 0, &mut path, &mut packet);
 
 	packet
+}
+
+/// Placeholder for read+write shape evaluation. Not yet implemented.
+pub fn edit_packet_for_context_shape<const DEPTH: usize>(
+	_shape: &dyn ContextShape,
+	_root_aabb: Aabb,
+) -> EditPacket<DEPTH> {
+	todo!("read+write shape evaluation not yet implemented")
 }
 
 fn collect_shape_edits<const DEPTH: usize>(

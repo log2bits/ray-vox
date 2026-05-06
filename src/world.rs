@@ -7,7 +7,7 @@ pub use pool::ChunkPool;
 
 use crate::{
 	chunk::{Chunk, VoxelEdit},
-	shape::Shape,
+	shape::{ContextShape, Shape},
 	tree::{Aabb, Ray, RayHit, Tree},
 	types::Voxel,
 };
@@ -32,10 +32,42 @@ pub enum PersistentChunk {
 	Active(u32),     // handle into pool; chunk lives there at full resolution
 }
 
-pub struct ShapeEdit {
-	pub aabb: Aabb, // cached from shape.aabb() for O(1) per-chunk rejection
-	pub min_lod: u8,
-	pub shape: Box<dyn Shape>,
+/// A lazy edit stored in the world's shape edit list. Evaluated at `generate_chunk` time
+/// to produce an `EditPacket`, which is then applied to the chunk's tree.
+/// Ephemeral chunks are generated entirely from this list; persistent chunks bake it once.
+pub enum ShapeEdit {
+	/// Write-only: pure geometry, no tree reads. Parallelizable across chunks.
+	Write {
+		aabb: Aabb,
+		min_lod: u8,
+		shape: Box<dyn Shape>,
+	},
+	/// Read+write: may query the tree during coverage evaluation.
+	/// Applied sequentially after all Write edits in the same stage are flushed.
+	/// Not yet implemented.
+	ReadWrite {
+		aabb: Aabb,
+		min_lod: u8,
+		shape: Box<dyn ContextShape>,
+	},
+}
+
+impl ShapeEdit {
+	pub fn write(aabb: Aabb, min_lod: u8, shape: Box<dyn Shape>) -> Self {
+		ShapeEdit::Write { aabb, min_lod, shape }
+	}
+
+	pub fn aabb(&self) -> &Aabb {
+		match self {
+			ShapeEdit::Write { aabb, .. } | ShapeEdit::ReadWrite { aabb, .. } => aabb,
+		}
+	}
+
+	pub fn min_lod(&self) -> u8 {
+		match self {
+			ShapeEdit::Write { min_lod, .. } | ShapeEdit::ReadWrite { min_lod, .. } => *min_lod,
+		}
+	}
 }
 
 pub struct WorldHit {
@@ -47,10 +79,15 @@ pub struct WorldHit {
 
 impl World {
 	pub fn new() -> Self {
-		todo!()
+		Self {
+			world_tree: Tree::new(1),
+			pool: ChunkPool::new(),
+			shape_edits: Vec::new(),
+			persistent_chunks: HashMap::new(),
+		}
 	}
 	pub fn add_shape_edit(&mut self, edit: ShapeEdit) {
-		todo!()
+		self.shape_edits.push(edit);
 	}
 	// Queue a player voxel edit. Creates a persistent chunk for this position if
 	// one doesn't exist yet (baking current shape edit state first).

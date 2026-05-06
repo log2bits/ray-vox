@@ -30,12 +30,12 @@ impl Voxel {
 		Voxel(r | g | b | rough | e | m | t)
 	}
 
-	pub fn delete() -> Self {
-		Voxel(u32::MAX)
+	pub fn air() -> Self {
+		Voxel(0)
 	}
 
-	pub fn is_delete(self) -> bool {
-		self.0 == u32::MAX
+	pub fn is_air(self) -> bool {
+		self.0 == 0
 	}
 
 	pub fn rgb(self) -> [u8; 3] {
