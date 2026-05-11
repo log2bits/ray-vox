@@ -1,6 +1,45 @@
 use super::{Coverage, Shape};
 use crate::{tree::Aabb, types::Voxel};
 
+pub struct CheckeredSphere {
+    pub center:   [i64; 3],
+    pub radius:   i64,
+    pub material_a: Voxel,
+    pub material_b: Voxel,
+}
+
+impl Shape for CheckeredSphere {
+    fn aabb(&self) -> Aabb {
+        let radius = self.radius.max(0);
+        let extent = radius.saturating_add(1);
+        Aabb {
+            min: self.center.map(|c| c.saturating_sub(radius)),
+            max: self.center.map(|c| c.saturating_add(extent)),
+        }
+    }
+
+    fn coverage(&self, node_aabb: Aabb, lod: u8) -> Coverage {
+        let radius    = self.radius.max(0) as i128;
+        let radius_sq = radius * radius;
+        let sample_max = node_aabb.max.map(|v| v - 1);
+
+        let min_dist_sq =
+            axis_distance_sq(self.center, node_aabb.min, sample_max, nearest_distance);
+        if min_dist_sq > radius_sq {
+            return Coverage::Empty;
+        }
+
+        if lod == 0 {
+            // Single voxel — pick colour from 3D checkerboard parity.
+            let parity = (node_aabb.min[0] + node_aabb.min[1] + node_aabb.min[2]) & 1;
+            let mat = if parity == 0 { self.material_a } else { self.material_b };
+            return Coverage::Full(mat);
+        }
+
+        Coverage::Partial
+    }
+}
+
 pub struct Sphere {
 	pub center: [i64; 3],
 	pub radius: i64,

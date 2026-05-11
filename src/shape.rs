@@ -3,7 +3,7 @@ mod sphere;
 mod terrain;
 
 pub use rect::Rect;
-pub use sphere::Sphere;
+pub use sphere::{CheckeredSphere, Sphere};
 pub use terrain::Terrain;
 
 use crate::{
