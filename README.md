@@ -1,4 +1,6 @@
-A voxel renderer built around software ray tracing, built in Rust + WebGPU.
+# ray-vox
+
+A voxel renderer built around software ray tracing (no rasterization), built in Rust + WebGPU.
 
 # Primary Data Structure
 Heavily modified sparse voxel data structure. The acronym is an abomination: **CBEPSV64DAG**
