@@ -1,14 +1,10 @@
 [package]
-name = "lattice"
+name = "ray-vox"
 version = "0.1.0"
 edition = "2024"
 
 [lib]
 path = "src/lib.rs"
-
-[[bin]]
-name = "lattice"
-path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
@@ -25,10 +21,6 @@ egui = "0.30"
 egui-wgpu = "0.30"
 egui-winit = "0.30"
 rdxsort = "0.3.0"
-
-[[bench]]
-name = "apply"
-harness = false
 
 [profile.release]
 opt-level = 3
