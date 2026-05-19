@@ -87,6 +87,7 @@ Heavily modified sparse voxel data structure. The acronym is an abomination: **C
 | 2    | Metallic    | Albedo tints specular          |
 | 1    | Transparent | Refracts rather than reflects  |
 | 0    | Textured    | Add random variation to color  |
+
 Voxel value 0 is reserved as **air**. It is the zero-state of the bitpacked arrays and requires no storage.
 
 ### References
