@@ -37,10 +37,31 @@ Heavily modified sparse voxel data structure. The acronym is an abomination: **C
 ### World Clipmap
 - World stores chunks in a 28 level clipmap. (spans the 2^64 coordinate space)
 - Each clipmap is 8^3 chunks, and gets 4x bigger each time.
-- Clipmap stores chunk handles (u32 * 8^3 * 28) = 57 KB and an occupancy bitmask (u1 * 8^3 * 28) = 1.8 KB
+- Clipmap stores chunk handles (u16 * 8^3 * 28) = 28 KB and an occupancy bitmask (u1 * 8^3 * 28) = 1.8 KB
 - Top level is 4x4x4 cells (exact 2^64 fit)
 - All other levels are 8×8×8 with a 2×2×2 inner cutout filled by the next finer level.
 - LOD boundaries always 3 cells from the camera; coarse LOD is never visible up close.
+- Chunk handles are u16 (max 14,336 chunks across all levels fits comfortably in u16's 65,536 range)
+
+### Chunk Handle Encoding (u16)
+
+The chunk handle encodes the full clipmap position directly, making world-space position recovery O(1) with no table lookup:
+
+```
+[15..14] unused
+[13..9]  level  (5 bits, 0-27)
+[8..6]   x      (3 bits, 0-7)
+[5..3]   y      (3 bits, 0-7)
+[2..0]   z      (3 bits, 0-7)
+```
+
+World-space position recovery:
+```
+chunk_world_pos = clipmap_origin[level] + (x, y, z) * chunk_size[level]
+voxel_world_pos = chunk_world_pos + decode_path(path) * voxel_size[level]
+```
+
+This means any face ID or emissive voxel ID can have its world-space position recovered in O(1), enabling direction vectors between any two encoded positions as a simple subtraction.
 
 ### Editing
 - The world stores an ordered list of all procedural edits. When a chunk is stale or new, we find all edits that overlap the chunk (using AABB) and apply them.
@@ -55,7 +76,7 @@ Heavily modified sparse voxel data structure. The acronym is an abomination: **C
 
 ### GPU Memory
 - Chunks are stored as a large pool in a free-list. Chunks have highly variable memory length, so the free-list is essential.
-- Chunk offset table to map the u32 chunk handle to the offset in memory
+- Chunk offset table to map the u16 chunk handle to the offset in memory
 - Edits re-upload only the affected chunk.
 
 ## Rendering
@@ -73,9 +94,69 @@ Heavily modified sparse voxel data structure. The acronym is an abomination: **C
 - LOD-aware shape coverage skips sub-voxel detail passes at coarse levels.
 
 ### Per Face Lighting
-- GPU hashmap maps voxel face world coordinates to lighting information, and is lookup up when drawing to the screen.
-- Per-face temporal cache
-- One shadow ray per visible face
+
+#### Overview
+Lighting is cached per voxel face in a GPU hashmap. Rendering is split into three passes to avoid read/write hazards and allow batched shadow ray dispatch:
+
+- **Pass 1 — Traversal:** rays traverse the scene and write a face ID per pixel into a G-buffer. No hashmap access.
+- **Pass 2 — Lighting lookup:** face IDs are deduplicated (many pixels share the same face). Each unique face is looked up in the hashmap. Cache hits return cached lighting. Cache misses are queued for shadow ray dispatch. A screen-space temporal layer compares the current face ID against last frame's stored face ID at the same pixel — for static geometry this absorbs the majority of lookups before touching the hashmap.
+- **Pass 3 — Shadow rays & writeback:** shadow rays are dispatched for uncached faces. Results are written back to the hashmap.
+
+Final shading:
+```
+final_color = albedo * rgb
+```
+
+where `rgb` is the total blended incident light from all sources cached in the hashmap value.
+
+#### Lighting Model
+```
+total lighting = direct shadow ray (one per visible face to the sun)
+              + emissive contributions (up to 4 cached emissive voxels per face, direct rays)
+              + multiple bounce lighting for global illumination
+              + sky ambient
+```
+
+Multi-bounce GI is handled via progressive accumulation — a fixed ray budget per frame is blended into cached results over many frames, converging toward correct path-traced output without a full per-frame solve.
+
+Emissive voxels off-screen are discovered via random bounce rays. Once discovered they are added to the global emissive voxel pool and can light visible faces directly. Rays are also fired outward from newly discovered emissive voxels (bidirectional), seeding face caches for surfaces the light can see without waiting for camera-side rays to find the connection.
+
+#### Hashmap
+
+~1-2M slots, 16 bytes per slot, ~32MB total. Load factor ~0.5.
+
+**Key (8 bytes / u64) — stable face identifier, never mutated:**
+
+```
+[63..48] chunk_id      u16  — clipmap-encoded chunk position (see Chunk Handle Encoding)
+[47..16] path          [u8; 4] — 6 bits slot (1-64, 0=termination), 2 bits unused per level
+[15..8]  face_direction u8  — bits 7-5: face direction (0-5), bits 4-0: unused
+[7..0]   reserved      u8
+```
+
+The path encoding is identical to the edit path format. The chunk handle encodes the full clipmap position, so world-space position of any face is recoverable in O(1) — see Chunk Handle Encoding above.
+
+**Value (8 bytes):**
+
+```
+rgb:          [u8; 3]  — total blended incident lighting from all sources
+generation:   u8       — compared against a global frame counter; stale entries need no explicit eviction
+emissive_ids: [u8; 4]  — indices into global emissive voxel pool (0 = empty slot, 1-255 = valid)
+```
+
+#### Emissive Voxel Pool
+
+A global pool of up to 255 discovered emissive voxels. The entire pool is 255 × 8 = **2040 bytes**, fitting comfortably in L1 cache and remaining resident during shading passes. Indices are u8 (0 reserved as empty sentinel). When the pool is full, the lowest-influence entry (by intensity / distance²) is evicted.
+
+**Pool entry (8 bytes):**
+
+```
+[63..48] chunk_id  u16     — clipmap-encoded chunk position
+[47..16] path      [u8; 4] — path to voxel within chunk, same encoding as face ID path
+[15..0]  unused    u16
+```
+
+No face direction is stored — emissive voxels are identified by position only. Color is fetched from the voxel data at ray dispatch time since the chunk must be accessed anyway to begin traversal.
 
 ## Voxel Format
 
