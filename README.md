@@ -27,12 +27,48 @@ Heavily modified sparse voxel data structure. The acronym is an abomination: **C
 - Depth 4 chunks = 256^3 voxels, allowing chunk local coordinates can be stored as [u8; 3]
 - A leaf mask per node allows larger voxels higher up in the tree, avoiding unnecessary descent
 - Materials array is fully packed, doubling as LOD storage and leaf storage.
-- Materials are stored in bitpacked arrays based on how many unique voxel materials exist in said chunk. 
-- The bitpacked arrays have power-of-2 bitwidths that scale based on content.
-- LUT for each chunk allow bitpacking to work efficiently
-- SoA layout per level
+- AoS node layout: internal nodes are 20 bytes (5 u32s), leaf nodes are 8 bytes (2 u32s). All fields for a node are fetched together instead of 5 separate SoA array reads per node visit. Internal and leaf nodes live in separate arrays.
 - DAG allows identical subtrees to share memory
+- Materials are stored in a per-chunk bitpacked array with a LUT. Bit width scales with unique material count: a chunk with 2 materials uses 1 bit per slot, 4 materials uses 2 bits, up to 8 bits for 256 materials.
+- The LUT maps compact indices to full voxel values, so the hot traversal path only touches small indices.
 - Persistent chunks (player-edited) are stored permanently. Procedural chunks are generated on demand and discarded when out of range.
+
+### Internal Node Format (20 bytes)
+
+```
+[31..0]  occ_lo     u32  - occupancy mask bits 0-31  (which of the 64 child slots are occupied)
+[31..0]  occ_hi     u32  - occupancy mask bits 32-63
+[31..0]  leaf_lo    u32  - is_leaf mask bits 0-31    (which occupied children are leaf nodes)
+[31..0]  leaf_hi    u32  - is_leaf mask bits 32-63
+[31..0]  child_ptr  u32  - index of first child in whichever array (internal or leaf)
+```
+
+`child_ptr + popcount_below(occ_mask, slot)` gives the child index. Whether that indexes the internal node array or the leaf node array is determined by the corresponding bit in the is_leaf mask.
+
+A node anywhere in the tree can mark all its children as leaves, collapsing large uniform regions without descending further. A fully uniform 64-voxel node collapses to a single 8-byte leaf instead of 64 children.
+
+### Leaf Node Format (8 bytes)
+
+```
+[31..0]  occ_lo     u32  - occupancy mask bits 0-31
+[31..0]  occ_hi     u32  - occupancy mask bits 32-63
+```
+
+No child pointer needed - leaf nodes index into the materials array implicitly. Internal and leaf nodes live in separate arrays, so the shader knows which array to use from the parent's is_leaf mask.
+
+### Material Array (per chunk)
+
+```
+[palette_entry_0]     u32  - full Voxel value
+[palette_entry_1]     u32
+...
+[palette_entry_K-1]   u32
+[bitpacked indices]        - next_pow2(ceil(log2(K))) bits per occupied leaf slot
+```
+
+Bit width is a single chunk-level uniform, fixed to the next power of 2 so indices can be extracted with a bitshift and mask rather than a division. At 2 materials: 1 bit/slot. At 3-4 materials: 2 bits/slot. At 5-16 materials: 4 bits/slot. At 17-256 materials: 8 bits/slot.
+
+The array is fully packed - only occupied slots have entries, indexed via `child_ptr + popcount_below(occ_mask, slot)`. Uniform nodes higher up in the tree write into the same array as bottom-level leaf nodes.
 
 ### World Clipmap
 - World stores chunks in a 28 level clipmap. (spans the 2^64 coordinate space)
@@ -98,9 +134,9 @@ This means any face ID or emissive voxel ID can have its world-space position re
 #### Overview
 Lighting is cached per voxel face in a GPU hashmap. Rendering is split into three passes to avoid read/write hazards and allow batched shadow ray dispatch:
 
-- **Pass 1 — Traversal:** rays traverse the scene and write a face ID per pixel into a G-buffer. No hashmap access.
-- **Pass 2 — Lighting lookup:** face IDs are deduplicated (many pixels share the same face). Each unique face is looked up in the hashmap. Cache hits return cached lighting. Cache misses are queued for shadow ray dispatch. A screen-space temporal layer compares the current face ID against last frame's stored face ID at the same pixel — for static geometry this absorbs the majority of lookups before touching the hashmap.
-- **Pass 3 — Shadow rays & writeback:** shadow rays are dispatched for uncached faces. Results are written back to the hashmap.
+- **Pass 1 - Traversal:** rays traverse the scene and write a face ID per pixel into a G-buffer. No hashmap access.
+- **Pass 2 - Lighting lookup:** face IDs are deduplicated (many pixels share the same face). Each unique face is looked up in the hashmap. Cache hits return cached lighting. Cache misses are queued for shadow ray dispatch. A screen-space temporal layer compares the current face ID against last frame's stored face ID at the same pixel - for static geometry this absorbs the majority of lookups before touching the hashmap.
+- **Pass 3 - Shadow rays & writeback:** shadow rays are dispatched for uncached faces. Results are written back to the hashmap.
 
 Final shading:
 ```
@@ -117,7 +153,7 @@ total lighting = direct shadow ray (one per visible face to the sun)
               + sky ambient
 ```
 
-Multi-bounce GI is handled via progressive accumulation — a fixed ray budget per frame is blended into cached results over many frames, converging toward correct path-traced output without a full per-frame solve.
+Multi-bounce GI is handled via progressive accumulation - a fixed ray budget per frame is blended into cached results over many frames, converging toward correct path-traced output without a full per-frame solve.
 
 Emissive voxels off-screen are discovered via random bounce rays. Once discovered they are added to the global emissive voxel pool and can light visible faces directly. Rays are also fired outward from newly discovered emissive voxels (bidirectional), seeding face caches for surfaces the light can see without waiting for camera-side rays to find the connection.
 
@@ -125,23 +161,23 @@ Emissive voxels off-screen are discovered via random bounce rays. Once discovere
 
 ~1-2M slots, 16 bytes per slot, ~32MB total. Load factor ~0.5.
 
-**Key (8 bytes / u64) — stable face identifier, never mutated:**
+**Key (8 bytes / u64) - stable face identifier, never mutated:**
 
 ```
-[63..48] chunk_id      u16  — clipmap-encoded chunk position (see Chunk Handle Encoding)
-[47..16] path          [u8; 4] — 6 bits slot (1-64, 0=termination), 2 bits unused per level
-[15..8]  face_direction u8  — bits 7-5: face direction (0-5), bits 4-0: unused
+[63..48] chunk_id      u16  - clipmap-encoded chunk position (see Chunk Handle Encoding)
+[47..16] path          [u8; 4] - 6 bits slot (1-64, 0=termination), 2 bits unused per level
+[15..8]  face_direction u8  - bits 7-5: face direction (0-5), bits 4-0: unused
 [7..0]   reserved      u8
 ```
 
-The path encoding is identical to the edit path format. The chunk handle encodes the full clipmap position, so world-space position of any face is recoverable in O(1) — see Chunk Handle Encoding above.
+The path encoding is identical to the edit path format. The chunk handle encodes the full clipmap position, so world-space position of any face is recoverable in O(1) - see Chunk Handle Encoding above.
 
 **Value (8 bytes):**
 
 ```
-rgb:          [u8; 3]  — total blended incident lighting from all sources
-generation:   u8       — compared against a global frame counter; stale entries need no explicit eviction
-emissive_ids: [u8; 4]  — indices into global emissive voxel pool (0 = empty slot, 1-255 = valid)
+rgb:          [u8; 3]  - total blended incident lighting from all sources
+generation:   u8       - compared against a global frame counter; stale entries need no explicit eviction
+emissive_ids: [u8; 4]  - indices into global emissive voxel pool (0 = empty slot, 1-255 = valid)
 ```
 
 #### Emissive Voxel Pool
@@ -151,12 +187,12 @@ A global pool of up to 255 discovered emissive voxels. The entire pool is 255 ×
 **Pool entry (8 bytes):**
 
 ```
-[63..48] chunk_id  u16     — clipmap-encoded chunk position
-[47..16] path      [u8; 4] — path to voxel within chunk, same encoding as face ID path
+[63..48] chunk_id  u16     - clipmap-encoded chunk position
+[47..16] path      [u8; 4] - path to voxel within chunk, same encoding as face ID path
 [15..0]  unused    u16
 ```
 
-No face direction is stored — emissive voxels are identified by position only. Color is fetched from the voxel data at ray dispatch time since the chunk must be accessed anyway to begin traversal.
+No face direction is stored - emissive voxels are identified by position only. Color is fetched from the voxel data at ray dispatch time since the chunk must be accessed anyway to begin traversal.
 
 ## Voxel Format
 
