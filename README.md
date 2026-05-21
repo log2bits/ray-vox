@@ -25,7 +25,18 @@ Heavily modified sparse voxel data structure. The acronym is an abomination: **C
 ### Chunk
 - All chunks have the same depth (4), regardless of which clipmap level they exist in.
 - Depth 4 chunks = 256^3 voxels, allowing chunk local coordinates can be stored as [u8; 3]
-- A leaf mask per node allows larger voxels higher up in the tree, avoiding unnecessary descent
+- Two masks per node (branch_mask and terminal_mask) encode four child states:
+
+  branch + terminal = leaf node,
+  
+  branch + not terminal = interior node,
+  
+  not branch + terminal = filled node (single material, no node stored),
+
+  not branch + not terminal = empty.
+  
+  Occupied children = branch_mask | terminal_mask.
+
 - Materials array is fully packed, doubling as LOD storage and leaf storage.
 - AoS node layout: internal nodes are 20 bytes (5 u32s), leaf nodes are 8 bytes (2 u32s). All fields for a node are fetched together instead of 5 separate SoA array reads per node visit. Internal and leaf nodes live in separate arrays.
 - DAG allows identical subtrees to share memory
@@ -36,16 +47,14 @@ Heavily modified sparse voxel data structure. The acronym is an abomination: **C
 ### Internal Node Format (20 bytes)
 
 ```
-[31..0]  occ_lo     u32  - occupancy mask bits 0-31  (which of the 64 child slots are occupied)
-[31..0]  occ_hi     u32  - occupancy mask bits 32-63
-[31..0]  leaf_lo    u32  - is_leaf mask bits 0-31    (which occupied children are leaf nodes)
-[31..0]  leaf_hi    u32  - is_leaf mask bits 32-63
-[31..0]  child_ptr  u32  - index of first child in whichever array (internal or leaf)
+[31..0]  branch_lo   u32  - branch mask bits 0-31  (children that are interior or leaf nodes)
+[31..0]  branch_hi   u32  - branch mask bits 32-63
+[31..0]  terminal_lo u32  - terminal mask bits 0-31 (children that are leaf or filled nodes)
+[31..0]  terminal_hi u32  - terminal mask bits 32-63
+[31..0]  child_ptr   u32  - index of first child in whichever array (interior or leaf)
 ```
 
-`child_ptr + popcount_below(occ_mask, slot)` gives the child index. Whether that indexes the internal node array or the leaf node array is determined by the corresponding bit in the is_leaf mask.
-
-A node anywhere in the tree can mark all its children as leaves, collapsing large uniform regions without descending further. A fully uniform 64-voxel node collapses to a single 8-byte leaf instead of 64 children.
+The four combinations of branch and terminal bits determine child type. Interior nodes are indexed from the interior node array, leaf nodes from the leaf node array, and filled nodes contribute a single entry directly to the materials array. No node is allocated for filled children.
 
 ### Leaf Node Format (8 bytes)
 
@@ -54,7 +63,7 @@ A node anywhere in the tree can mark all its children as leaves, collapsing larg
 [31..0]  occ_hi     u32  - occupancy mask bits 32-63
 ```
 
-No child pointer needed - leaf nodes index into the materials array implicitly. Internal and leaf nodes live in separate arrays, so the shader knows which array to use from the parent's is_leaf mask.
+Leaf nodes exist only for partially occupied regions (branch + terminal). Fully uniform regions use the filled encoding instead and store no node at all, only a single material entry in the parent's materials array.
 
 ### Material Array (per chunk)
 
@@ -206,6 +215,28 @@ No face direction is stored - emissive voxels are identified by position only. C
 | 0    | Textured    | Add random variation to color  |
 
 Voxel value 0 is reserved as **air**. It is the zero-state of the bitpacked arrays and requires no storage.
+
+## Planned Voxel Import Formats
+
+### Minecraft Worlds (.mca)
+- Every block is given a unique material, and a block face texture lookup is sent to the GPU
+- Every block is represented as 16^3 voxels of the same material
+- GPU looks up color on hit from block texture table (different faces can have different colors too!)
+- Each set of block textures uses a color LUT to keep each color under 1 byte (there are less than 256 unique colors in each minecraft block)
+- This should allow for compression greater than even minecraft's .mca since we have DAG deduplication and bitpacking
+- Only limitation is that all block models must be remapped to voxels so some blocks may look off (the lectern for example)
+
+### MagicaVoxel (.vox)
+- Quite straightforward
+
+### GLTF (.gltf/.glb)
+- Bin triangles into chunks
+- Do triangle voxel intersection tests
+- Configurable voxel scale
+- Configurable color palette
+- PBR material extraction (ideally)
+
+## Resources
 
 ### References
 
