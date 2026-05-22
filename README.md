@@ -1,286 +1,314 @@
 # ray-vox
 
-A voxel renderer built around software ray tracing (no rasterization), built in Rust + WebGPU.
+A voxel renderer that ray traces everything (no rasterization). Rust + WebGPU.
 
-# Primary Data Structure
-Heavily modified sparse voxel data structure. The acronym is an abomination: **CBEPSV64DAG**
-- C - Clipmapped (many individual trees in one big clipmap)
-- B - Bitpacked (values and offsets use only as many bits as required)
-- E - [Efficient](https://research.nvidia.com/sites/default/files/pubs/2010-02_Efficient-Sparse-Voxel/laine2010i3d_paper.pdf) (allows for leaf nodes anywhere in the tree)
-- P - [Pointerless](https://www.cai.sk/ojs/index.php/cai/article/view/2020_3_587) (implicit offsets are stored instead of explicit pointers)
-- S - Sparse (only occupied nodes are stored, empty space is stored efficiently)
-- V - Voxel (Volumetric Pixel)
-- 64 - Tetrahexacontree (or [64-tree](https://dubiousconst282.github.io/2024/10/03/voxel-ray-tracing/))
-- DAG - Directed Acyclic Graph
+## Data Structure
 
-# Priorities
-1. Extremely fast ray traversal (as fast as I can go without resorting to hardware RT)
-2. Wonderful compression
-3. Quick editability
+It's called CBEPSV64DAG. An acronym pile-up:
 
-# Optimizations
+- C, clipmapped. Many trees inside one big clipmap.
+- B, bitpacked. Every value uses only as many bits as it needs.
+- E, [efficient](https://research.nvidia.com/sites/default/files/pubs/2010-02_Efficient-Sparse-Voxel/laine2010i3d_paper.pdf). Leaf nodes allowed anywhere in the tree.
+- P, [pointerless](https://www.cai.sk/ojs/index.php/cai/article/view/2020_3_587). Popcount-implicit offsets, no per-cell pointers.
+- S, sparse. Empty space costs nothing.
+- V, voxel.
+- 64, 4^3 branching [tetrahexacontree](https://dubiousconst282.github.io/2024/10/03/voxel-ray-tracing/).
+- DAG, identical subtrees share storage.
 
-## Storage
+## Priorities
 
-### Chunk
-- All chunks have the same depth (4), regardless of which clipmap level they exist in.
-- Depth 4 chunks = 256^3 voxels, allowing chunk local coordinates can be stored as [u8; 3]
-- Two masks per node (branch_mask and terminal_mask) encode four child states:
+1. Fast ray traversal, no hardware RT.
+2. Heavy compression.
+3. Quick edits.
 
-  branch + terminal = leaf node,
-  
-  branch + not terminal = interior node,
-  
-  not branch + terminal = filled node (single material, no node stored),
+# Storage
 
-  not branch + not terminal = empty.
-  
-  Occupied children = branch_mask | terminal_mask.
+## Chunks
 
-- Materials array is fully packed, doubling as LOD storage and leaf storage.
-- AoS node layout: internal nodes are 24 bytes (6 u32s), leaf nodes are 12 bytes (3 u32s). All fields for a node are fetched in a single load instead of touching 5 separate SoA arrays per node visit. Internal and leaf nodes live in separate arrays, addressed by a single packed pointer field on the internal node.
-- DAG allows identical subtrees to share memory
-- Materials are stored in a per-chunk bitpacked array with a LUT. Bit width scales with unique material count: a chunk with 2 materials uses 1 bit per slot, 4 materials uses 2 bits, up to 8 bits for 256 materials.
-- The LUT maps compact indices to full voxel values, so the hot traversal path only touches small indices.
-- Persistent chunks (player-edited) are stored permanently. Procedural chunks are generated on demand and discarded when out of range.
+Each node has two 64-bit masks, `branch_mask` and `terminal_mask`. Together they pick one of four cell states:
 
-### Internal Node Format (24 bytes)
+| branch | terminal | meaning                                       |
+|:------:|:--------:|-----------------------------------------------|
+|   0    |    0     | empty                                         |
+|   0    |    1     | filled, one material, no child node stored    |
+|   1    |    0     | interior child node                           |
+|   1    |    1     | leaf child node                               |
 
-```
-[31..0]   branch_lo     u32  - branch mask bits 0-31  (children that are interior or leaf nodes)
-[31..0]   branch_hi     u32  - branch mask bits 32-63
-[31..0]   terminal_lo   u32  - terminal mask bits 0-31 (children that are leaf or filled nodes)
-[31..0]   terminal_hi   u32  - terminal mask bits 32-63
-[12..0]   interior_ptr       - 13 bits, base index into interior node array
-[31..13]  leaf_ptr           - 19 bits, base index into leaf node array
-[31..0]   mat_offset    u32  - bit offset into chunk's materials array for filled children
-```
+A cell is occupied if either bit is set.
 
-The four combinations of branch and terminal bits determine child type. Each kind is found by a popcount on the appropriate sub-mask:
+- Every chunk is depth 4 regardless of clipmap level. 256^3 voxels each, chunk-local coords fit in `[u8; 3]`.
+- AoS layout. Interior nodes are 24 bytes, leaf nodes are 12 bytes. One fetch per visit, no SoA scatter across five arrays.
+- Interior and leaf nodes live in separate arrays. The parent addresses both with a single packed pointer field.
+- Materials array is fully packed. Doubles as LOD storage and leaf storage.
+- DAG dedupes identical subtrees.
+- Per-chunk material LUT. Bit width scales from 1 bit (2 materials) up to 32 bits (unique per voxel). LUT entries are full voxel values, so the hot traversal path only touches small indices.
+- Persistent chunks (player edits) stick around. Procedural chunks generate on demand and discard out of range.
 
--  branch &  terminal -> leaf child node:     `leaf_ptr     + popcount(branch &  terminal & below)`
--  branch & !terminal -> interior child:      `interior_ptr + popcount(branch & !terminal & below)`
-- !branch &  terminal -> filled (1 material): `mat_offset   + popcount(!branch &  terminal & below) * material_width`
-- !branch & !terminal -> empty.
-
-No node is allocated for filled children - they contribute a single entry directly to the materials array.
-
-The interior and leaf pointers are packed into one u32 because they don't both need 32 bits: a chunk has at most 64^2 + 64 + 1 = 4161 interior nodes (fits in 13 bits) and ~64^3 + 4160 = 266K leaf nodes (fits in 19 bits). Together: exactly 32 bits, no waste. Extraction is one shift and one mask. Static asserts on these bounds catch any future depth/branching change.
-
-### Leaf Node Format (12 bytes)
+## Interior Node (24 bytes)
 
 ```
-[31..0]  occ_lo      u32  - occupancy mask bits 0-31
-[31..0]  occ_hi      u32  - occupancy mask bits 32-63
-[31..0]  mat_offset  u32  - bit offset into chunk's materials array
+branch_lo    u32   // branch mask bits 0..31
+branch_hi    u32   // branch mask bits 32..63
+terminal_lo  u32   // terminal mask bits 0..31
+terminal_hi  u32   // terminal mask bits 32..63
+ptrs         u32   // [12..0]  interior_ptr  (13 bits, into interior array)
+                   // [31..13] leaf_ptr      (19 bits, into leaf array)
+mat_offset   u32   // bit offset into chunk's materials array
 ```
 
-Leaf nodes have no branches by definition, so a single occupancy mask suffices - it doubles as the terminal mask. Every occupied cell at slot `i` maps to a material entry at bit offset:
+`popcount_below(m, slot)` means `popcount(m & ((1 << slot) - 1))`.
+
+Looking up a child at a given slot:
+
+| state                            | location                                                            |
+|----------------------------------|---------------------------------------------------------------------|
+| interior (branch=1, terminal=0)  | `interior_ptr + popcount_below(branch & !terminal, slot)`           |
+| leaf (branch=1, terminal=1)      | `leaf_ptr + popcount_below(branch & terminal, slot)`                |
+| filled (branch=0, terminal=1)    | `mat_offset + popcount_below(!branch & terminal, slot) * mat_width` |
+| empty (branch=0, terminal=0)     | nothing stored                                                      |
+
+Pointer packing:
+
+- Max interior nodes per chunk: 64^2 + 64 + 1 = 4161, fits in 13 bits (8192 capacity).
+- Max leaf nodes per chunk: about 64^3 + 4160 = 266K, fits in 19 bits (524K capacity).
+- 13 + 19 = 32 exactly. No waste.
+- Extraction is one shift and one mask.
+- Static-assert these bounds so any change to depth or branching gets caught.
+
+## Leaf Node (12 bytes)
 
 ```
-mat_offset + popcount(occ_mask & ((1 << i) - 1)) * material_width
+occ_lo       u32   // occupancy mask bits 0..31
+occ_hi       u32   // occupancy mask bits 32..63
+mat_offset   u32   // bit offset into chunk's materials array
 ```
 
-Leaf nodes exist only for partially-occupied regions where individual cells differ. Fully uniform regions use the filled encoding in the parent instead and store no node at all, only a single material entry in the parent's materials array.
+- One mask is enough. It doubles as occupancy and terminal, since a leaf has no branches.
+- Cell `i` reads from: `mat_offset + popcount_below(occ_mask, i) * mat_width`.
+- Leaves only exist for partially-occupied regions where cells actually differ.
+- Uniform regions are stored as a `filled` cell on the parent instead. No node, one material entry.
 
-### Material Array (per chunk)
-
-```
-[palette_entry_0]     u32  - full Voxel value
-[palette_entry_1]     u32
-...
-[palette_entry_K-1]   u32
-[bitpacked indices]        - next_pow2(ceil(log2(K))) bits per occupied leaf slot
-```
-
-Bit width is a single chunk-level uniform, fixed to the next power of 2 so indices can be extracted with a bitshift and mask rather than a division. At 2 materials: 1 bit/slot. At 3-4 materials: 2 bits/slot. At 5-16 materials: 4 bits/slot. At 17-256 materials: 8 bits/slot.
-
-The bitpacked region is fully packed - only occupied entries take space. Each internal node addresses its filled children via its own `mat_offset`, and each leaf node addresses its cells via its own `mat_offset`. Both write into the same shared per-chunk bitpacked array - filled regions higher in the tree and bottom-level leaf node entries are stored side-by-side.
-
-### World Clipmap
-- World stores chunks in a 28 level clipmap. (spans the 2^64 coordinate space)
-- Each clipmap is 8^3 chunks, and gets 4x bigger each time.
-- Clipmap stores chunk handles (u16 * 8^3 * 28) = 28 KB and an occupancy bitmask (u1 * 8^3 * 28) = 1.8 KB
-- Top level is 4x4x4 cells (exact 2^64 fit)
-- All other levels are 8×8×8 with a 2×2×2 inner cutout filled by the next finer level.
-- LOD boundaries always 3 cells from the camera; coarse LOD is never visible up close.
-- Chunk handles are u16 (max 14,336 chunks across all levels fits comfortably in u16's 65,536 range)
-
-### Chunk Handle Encoding (u16)
-
-The chunk handle encodes the full clipmap position directly, making world-space position recovery O(1) with no table lookup:
+## Material Array (per chunk)
 
 ```
-[15..14] unused
-[13..9]  level  (5 bits, 0-27)
-[8..6]   x      (3 bits, 0-7)
-[5..3]   y      (3 bits, 0-7)
-[2..0]   z      (3 bits, 0-7)
+[K palette entries x u32]    // full voxel values
+[bitpacked indices]          // mat_width bits each, popcount-indexed
 ```
 
-World-space position recovery:
+`mat_width = next_pow2(ceil(log2(K)))`. Power-of-two widths mean extraction is shift and mask, never divide:
+
+| K (unique materials) | bits per slot |
+|:--------------------:|:-------------:|
+|         2            |       1       |
+|         3..4         |       2       |
+|         5..16        |       4       |
+|         17..256      |       8       |
+|       257..65536     |      16       |
+|       65537+         |      32       |
+
+- Both interior `mat_offset` (filled children) and leaf `mat_offset` (cells) write into the same shared per-chunk bitpacked array.
+- Mid-tree fills and bottom-level leaf entries sit side by side.
+
+## World Clipmap
+
+- 28 levels covering the 2^64 coord space.
+- Each level is 8^3 chunks, scaling 4x outward.
+- Top level is 4*4*4 (exact 2^64 fit).
+- All other levels are 8*8*8 with a 2*2*2 inner cutout that the next finer level fills.
+- LOD boundary is always at least 3 cells from the camera. Coarse LOD never shows up close.
+- Storage: 28 KB of chunk handles plus 1.8 KB occupancy bitmask.
+- Chunk handles are u16. Max around 14K chunks across all levels, well under the 65K cap.
+
+## Chunk Handle (u16)
+
 ```
-chunk_world_pos = clipmap_origin[level] + (x, y, z) * chunk_size[level]
-voxel_world_pos = chunk_world_pos + decode_path(path) * voxel_size[level]
+[15..14]  unused
+[13..9]   level    5 bits  (0..27)
+[8..6]    x        3 bits  (0..7)
+[5..3]    y        3 bits  (0..7)
+[2..0]    z        3 bits  (0..7)
 ```
 
-This means any face ID or emissive voxel ID can have its world-space position recovered in O(1), enabling direction vectors between any two encoded positions as a simple subtraction.
+World-space recovery is O(1), no lookup table:
 
-### Editing
-- The world stores an ordered list of all procedural edits. When a chunk is stale or new, we find all edits that overlap the chunk (using AABB) and apply them.
-- Each chunk stores its own ordered list of edit packets, which are applied sequentially.
-- Packets that come from procedural edits are sent in pre-sorted.
-- Packets that aren't sorted are lazily sorted later.
-- Each individual edit in a chunk is stored as a path, and a material.
-- The path can be any height in the tree, so we must store it as a u32. This is split into 4 blocks of 8 bits. The first 6 bits of each block store 1-64 for the slot, and 0 if the path terminates there.
-- The materials are stored in a list of bitpacked values with a LUT.
-- A voxel value of all zeros represents air or a deletion.
-- After an edit is applied, the tree is compacted, allowing DAG deduplication.
+```
+chunk_world = clipmap_origin[level] + (x, y, z) * chunk_size[level]
+voxel_world = chunk_world + decode_path(path) * voxel_size[level]
+```
 
-### GPU Memory
-- Chunks are stored as a large pool in a free-list. Chunks have highly variable memory length, so the free-list is essential.
-- Chunk offset table to map the u16 chunk handle to the offset in memory
-- Edits re-upload only the affected chunk.
+- Handle encodes the full clipmap position directly.
+- Any face ID or emissive ID can pull its world position back out.
+- Direction vectors between two encoded positions are just a subtraction.
 
-## Rendering
+## Editing
 
-### Ray Tracing
-- DDA with ancestor stack; neighbor steps pop/push the stack rather than restarting from the clipmap root.
-- Common ancestor found in O(1) via diffbits: XOR old and new position, clz, index stack directly.
-- Occupancy clipmap (1.7 KB) checked first as an L1-resident fast-reject. Shadow rays through empty sky never touch chunk data.
-- 2³ coarse occupancy grouping skips 8-cell empty regions in a single mask test.
-- Ray-octant mirroring bakes direction sign into the coordinate system, removing per-step branches in the inner loop.
-- Fractional coordinate system \[1.0, 2.0): cell index and floor-to-scale computed via float mantissa bit ops.
-- Position clamped to neighbor bounding box after each step rather than using a bias offset.
-- Ancestor stack in workgroup shared memory to reduce register pressure and improve occupancy.
-- Camera stored as integer chunk coordinates plus a chunk-local float offset; f32 is sufficient for all traversal math.
-- LOD-aware shape coverage skips sub-voxel detail passes at coarse levels.
+- World keeps an ordered list of all procedural edits.
+- Stale or new chunks find overlapping edits via AABB and apply them in order.
+- Each chunk has its own ordered edit packet list.
+- Procedural edits arrive pre-sorted. Player edits sort lazily.
+- One edit is a `(path, material)` pair.
+- Path is u32, split into four 8-bit blocks. Each block: 6 bits for a slot index (1..64), 0 means terminate at that level.
+- Materials live in a bitpacked list with a LUT (same format as chunk material array).
+- Voxel value 0 means air or delete.
+- After an edit, the tree recompacts and DAG dedup runs again.
 
-### Per Face Lighting
+## GPU Memory
 
-#### Overview
-Lighting is cached per voxel face in a GPU hashmap. Rendering is split into three passes to avoid read/write hazards and allow batched shadow ray dispatch:
+- Chunks live in a pool with a free list, since chunk size varies a lot.
+- Chunk offset table maps the u16 handle to the actual memory offset.
+- Edits only re-upload the affected chunk.
 
-- **Pass 1 - Traversal:** rays traverse the scene and write a face ID per pixel into a G-buffer. No hashmap access.
-- **Pass 2 - Lighting lookup:** face IDs are deduplicated (many pixels share the same face). Each unique face is looked up in the hashmap. Cache hits return cached lighting. Cache misses are queued for shadow ray dispatch. A screen-space temporal layer compares the current face ID against last frame's stored face ID at the same pixel - for static geometry this absorbs the majority of lookups before touching the hashmap.
-- **Pass 3 - Shadow rays & writeback:** shadow rays are dispatched for uncached faces. Results are written back to the hashmap.
+# Rendering
+
+## Ray Tracing
+
+- DDA with an ancestor stack. Neighbor steps pop or push the stack instead of restarting from the clipmap root.
+- O(1) common ancestor via diffbits. XOR old and new position, clz, index the stack.
+- 1.7 KB occupancy clipmap as an L1-resident fast reject. Sky-bound shadow rays never touch chunk data.
+- 2^3 coarse occupancy grouping skips 8-cell empty regions in one mask test.
+- Ray-octant mirroring bakes direction sign into the coord system. No per-step direction branches.
+- Fractional coord system in `[1.0, 2.0)`. Cell index and floor-to-scale are float mantissa bit ops.
+- After each step, position clamps to the neighbor bounding box. No bias offset.
+- Ancestor stack in workgroup shared memory. Lower register pressure, higher occupancy.
+- Camera is integer chunk coords plus a chunk-local f32 offset. f32 is enough for all traversal math.
+- LOD-aware shape coverage skips sub-voxel detail at coarse levels.
+
+## Per-Face Lighting
+
+Lighting is cached per voxel face in a GPU hashmap. Three passes, so reads and writes can't race and shadow rays can batch:
+
+1. Traversal. Rays write a face ID per pixel into the G-buffer. No hashmap access yet.
+2. Lookup. Face IDs get deduped (many pixels share a face). Each unique face probes the hashmap. Hits return cached light, misses queue shadow rays. A screen-space temporal layer also compares the current face ID against last frame's at the same pixel. For static geometry this catches most lookups before the hashmap ever gets touched.
+3. Shadow rays and writeback. Uncached faces dispatch shadow rays. Results write back to the hashmap.
 
 Final shading:
+
 ```
 final_color = albedo * rgb
 ```
 
-where `rgb` is the total blended incident light from all sources cached in the hashmap value.
+where `rgb` is the total blended incident light from everything cached in the hashmap value.
 
-#### Lighting Model
-```
-total lighting = direct shadow ray (one per visible face to the sun)
-              + emissive contributions (up to 4 cached emissive voxels per face, direct rays)
-              + multiple bounce lighting for global illumination
-              + sky ambient
-```
-
-Multi-bounce GI is handled via progressive accumulation - a fixed ray budget per frame is blended into cached results over many frames, converging toward correct path-traced output without a full per-frame solve.
-
-Emissive voxels off-screen are discovered via random bounce rays. Once discovered they are added to the global emissive voxel pool and can light visible faces directly. Rays are also fired outward from newly discovered emissive voxels (bidirectional), seeding face caches for surfaces the light can see without waiting for camera-side rays to find the connection.
-
-#### Hashmap
-
-~1-2M slots, 16 bytes per slot, ~32MB total. Load factor ~0.5.
-
-**Key (8 bytes / u64) - stable face identifier, never mutated:**
+### Lighting Model
 
 ```
-[63..48] chunk_id      u16  - clipmap-encoded chunk position (see Chunk Handle Encoding)
-[47..16] path          [u8; 4] - 6 bits slot (1-64, 0=termination), 2 bits unused per level
-[15..8]  face_direction u8  - bits 7-5: face direction (0-5), bits 4-0: unused
-[7..0]   reserved      u8
+total = direct sun shadow ray (one per visible face)
+      + up to 4 cached emissive contributions per face (direct rays)
+      + multi-bounce GI (progressive accumulation)
+      + sky ambient
 ```
 
-The path encoding is identical to the edit path format. The chunk handle encodes the full clipmap position, so world-space position of any face is recoverable in O(1) - see Chunk Handle Encoding above.
+- GI uses progressive accumulation. A fixed ray budget per frame blends into cached results over many frames, converging toward a path-traced reference without a full per-frame solve.
+- Off-screen emissive voxels get discovered by random bounce rays.
+- Once found, they enter the global emissive pool and light visible faces directly.
+- Newly-discovered emissives also fire rays outward, so face caches on surfaces the light can see fill in without waiting for camera-side rays to make the connection.
 
-**Value (8 bytes):**
+### Hashmap
 
-```
-rgb:          [u8; 3]  - total blended incident lighting from all sources
-generation:   u8       - compared against a global frame counter; stale entries need no explicit eviction
-emissive_ids: [u8; 4]  - indices into global emissive voxel pool (0 = empty slot, 1-255 = valid)
-```
+- About 1 to 2 million slots, 16 bytes per slot, around 32 MB total.
+- Load factor about 0.5.
 
-#### Emissive Voxel Pool
-
-A global pool of up to 255 discovered emissive voxels. The entire pool is 255 × 8 = **2040 bytes**, fitting comfortably in L1 cache and remaining resident during shading passes. Indices are u8 (0 reserved as empty sentinel). When the pool is full, the lowest-influence entry (by intensity / distance²) is evicted.
-
-**Pool entry (8 bytes):**
+Key (8 bytes, u64). Stable face identifier, never mutated:
 
 ```
-[63..48] chunk_id  u16     - clipmap-encoded chunk position
-[47..16] path      [u8; 4] - path to voxel within chunk, same encoding as face ID path
-[15..0]  unused    u16
+[63..48]  chunk_id        u16    // clipmap-encoded chunk position
+[47..16]  path            u8;4   // 6-bit slot + 2 unused per level
+[15..8]   face_direction  u8     // bits 7..5: direction 0..5, bits 4..0: unused
+[7..0]    reserved        u8
 ```
 
-No face direction is stored - emissive voxels are identified by position only. Color is fetched from the voxel data at ray dispatch time since the chunk must be accessed anyway to begin traversal.
+- Path encoding matches the edit format.
+- Chunk handle gives O(1) world position.
 
-## Voxel Format
+Value (8 bytes):
 
-| Bits | Field       | Notes                          |
-| ---- | ----------- | ------------------------------ |
-| 31–8 | RGB color   | 24-bit linear RGB              |
-| 7–4  | Roughness   | 0 = mirror, 15 = fully diffuse |
-| 3    | Emissive    | Emits light at albedo color    |
-| 2    | Metallic    | Albedo tints specular          |
-| 1    | Transparent | Refracts rather than reflects  |
-| 0    | Textured    | Add random variation to color  |
+```
+rgb            u8;3   // blended incident light from all sources
+generation     u8     // compared against a global frame counter, stale entries don't need explicit eviction
+emissive_ids   u8;4   // indices into the emissive pool (0 means empty)
+```
 
-Voxel value 0 is reserved as **air**. It is the zero-state of the bitpacked arrays and requires no storage.
+### Emissive Pool
 
-## Planned Voxel Import Formats
+- Global pool of up to 255 discovered emissive voxels.
+- Whole pool is 255 * 8 = 2040 bytes. Fits in L1, stays resident during shading.
+- u8 indices. 0 reserved as the empty sentinel.
+- When the pool fills, lowest-influence entry (intensity over distance squared) gets evicted.
 
-### Minecraft Worlds (.mca)
-- Every block is given a unique material, and a block face texture lookup is sent to the GPU
-- Every block is represented as 16^3 voxels of the same material
-- GPU looks up color on hit from block texture table (different faces can have different colors too!)
-- Each set of block textures uses a color LUT to keep each color under 1 byte (there are less than 256 unique colors in each minecraft block)
-- This should allow for compression greater than even minecraft's .mca since we have DAG deduplication and bitpacking
-- Only limitation is that all block models must be remapped to voxels so some blocks may look off (the lectern for example)
+Entry (8 bytes):
 
-### MagicaVoxel (.vox)
-- Quite straightforward
+```
+[63..48]  chunk_id  u16
+[47..16]  path      u8;4
+[15..0]   unused    u16
+```
 
-### GLTF (.gltf/.glb)
-- Bin triangles into chunks
-- Do triangle voxel intersection tests
-- Configurable voxel scale
-- Configurable color palette
-- PBR material extraction (ideally)
+- No face direction. Emissives are position-only.
+- Color is fetched from voxel data at ray dispatch, since the chunk has to be loaded anyway.
 
-## Resources
+# Voxel Format (u32)
 
-### References
+| Bits  | Field       | Notes                          |
+|-------|-------------|--------------------------------|
+| 31..8 | RGB color   | 24-bit linear RGB              |
+| 7..4  | Roughness   | 0 = mirror, 15 = fully diffuse |
+| 3     | Emissive    | Emits light at albedo color    |
+| 2     | Metallic    | Albedo tints specular          |
+| 1     | Transparent | Refracts, doesn't reflect      |
+| 0     | Textured    | Random color variation         |
 
-| Reference | Why it matters |
+- Voxel value 0 is air. Zero state of every bitpacked array, costs nothing to store.
+
+# Voxel Import Formats
+
+## Minecraft (.mca)
+
+- Each block ID becomes one material in the chunk LUT.
+- Each block is 16^3 voxels of one material, which lines up exactly with one Level-1 cell.
+- Block face textures live in a GPU-side table. On ray hit, the GPU resolves color from the per-block face texture table.
+- Different faces can return different colors.
+- Each face texture has its own color LUT. Fewer than 256 unique colors per block, so each voxel takes 1 byte at hit time.
+- Compresses tighter than `.mca` itself thanks to DAG dedup, bitpacking, and the 16^3 structural alignment.
+- Catch: non-cube models (lecterns, stairs, fences) get voxelized. Some end up looking off.
+
+## MagicaVoxel (.vox)
+
+- Direct translation. Materials and palette map across without much fuss.
+
+## glTF (.gltf, .glb)
+
+- Bin triangles into chunks.
+- Triangle/voxel intersection per voxel.
+- Configurable voxel scale and palette.
+- PBR material extraction (ideally).
+
+# Resources
+
+## References
+
+| Reference | Why it's here |
 |---|---|
-| [Guide to sparse 64-trees](https://dubiousconst282.github.io/2024/10/03/voxel-ray-tracing/) | Traversal algorithm: ancestor stack, coarse occupancy, octant mirroring, mantissa tricks |
-| [Aokana (2505.02017)](https://arxiv.org/abs/2505.02017) | Chunked SVDAG with LOD streaming; validates the uniform-chunk-resolution approach |
+| [Sparse 64-trees guide](https://dubiousconst282.github.io/2024/10/03/voxel-ray-tracing/) | Traversal algorithm: ancestor stack, coarse occupancy, octant mirroring, mantissa tricks |
+| [Aokana (2505.02017)](https://arxiv.org/abs/2505.02017) | Chunked SVDAG with LOD streaming, validates uniform-resolution chunks |
 | [Hybrid Voxel Formats (2410.14128)](https://arxiv.org/abs/2410.14128) | Systematic comparison of voxel storage formats |
-| [High Resolution SVDAGs](https://icg.gwu.edu/sites/g/files/zaxdzs6126/files/downloads/highResolutionSparseVoxelDAGs.pdf) | Original SVDAG paper |
-| [Efficient Sparse Voxel Octrees](https://www.researchgate.net/publication/47645140_Efficient_Sparse_Voxel_Octrees) | Laine & Karras; SVO traversal and beam optimization |
+| [High-Resolution SVDAGs](https://icg.gwu.edu/sites/g/files/zaxdzs6126/files/downloads/highResolutionSparseVoxelDAGs.pdf) | The original SVDAG paper |
+| [ESVO](https://www.researchgate.net/publication/47645140_Efficient_Sparse_Voxel_Octrees) | Laine and Karras, SVO traversal and beam optimization |
 | [Voxelis Bible](https://github.com/WildPixelGames/voxelis) | SVO-DAG deep dive: batching, CoW, SoA, LOD, hash consing |
-| [Amanatides & Woo DDA](http://www.cse.yorku.ca/~amana/research/grid.pdf) | DDA algorithm for grid traversal |
-| [Fast and Gorgeous Erosion Filter](https://blog.runevision.com/2026/03/fast-and-gorgeous-erosion-filter.html) | LOD-friendly per-point erosion |
+| [Amanatides and Woo DDA](http://www.cse.yorku.ca/~amana/research/grid.pdf) | DDA for grid traversal |
+| [Erosion filter](https://blog.runevision.com/2026/03/fast-and-gorgeous-erosion-filter.html) | LOD-friendly per-point erosion |
 
-### Channels
+## Channels
 
 | Channel | Focus |
 |---|---|
-| [Douglas Dwyer](https://www.youtube.com/@DouglasDwyer) | Octo voxel engine, Rust + WebGPU, path-traced GI |
-| [John Lin (Voxely)](https://www.youtube.com/@johnlin) | Path-traced voxel sandbox, per-face lighting pipeline |
+| [Douglas Dwyer](https://www.youtube.com/@DouglasDwyer) | Octo engine, Rust + WebGPU, path-traced GI |
+| [John Lin (Voxely)](https://www.youtube.com/@johnlin) | Path-traced voxel sandbox, per-face lighting |
 | [Gabe Rundlett](https://www.youtube.com/@GabeRundlett) | C++ voxel engine, Daxa/Vulkan |
-| [Ethan Gore](https://www.youtube.com/@EthanGore) | Voxel engine dev, binary greedy meshing |
+| [Ethan Gore](https://www.youtube.com/@EthanGore) | Engine dev, binary greedy meshing |
 | [VoxelRifts](https://www.youtube.com/@VoxelRifts) | Voxel programming explainers |
 | [SimonDev](https://www.youtube.com/@simondev758) | Radiance cascades |
 
-### Projects
+## Projects
 
 | Project | Description |
 |---|---|
@@ -288,14 +316,14 @@ Voxel value 0 is reserved as **air**. It is the zero-state of the bitpacked arra
 | [Voxelis](https://github.com/WildPixelGames/voxelis) | Rust SVO-DAG with batching, CoW, LOD |
 | [Octo Engine](https://github.com/DouglasDwyer/octo-release) | Rust + WebGPU voxel engine |
 | [tree64](https://github.com/expenses/tree64) | Rust sparse 64-tree |
-| [HashDAG](https://github.com/Phyronnaz/HashDAG) | HashDAG reference implementation |
+| [HashDAG](https://github.com/Phyronnaz/HashDAG) | Reference implementation |
 | [gvox](https://github.com/GabeRundlett/gvox) | Voxel format translation library |
 
-### More
+## More
 
 | Resource | Description |
 |---|---|
 | [Voxel.Wiki](https://voxel.wiki) | Community hub |
 | [Voxely.net blog](https://voxely.net/blog/) | John Lin's design posts |
-| [A Rundown on Brickmaps](https://uygarb.dev/posts/0003_brickmap_rundown/) | Brickmap/brickgrid explanation |
+| [Brickmap rundown](https://uygarb.dev/posts/0003_brickmap_rundown/) | Brickmap and brickgrid explanation |
 | [Branchless DDA (ShaderToy)](https://www.shadertoy.com/view/XdtcRM) | Branchless 3D DDA reference |
