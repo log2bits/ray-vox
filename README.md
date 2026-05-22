@@ -4,7 +4,7 @@ A voxel renderer that ray traces everything (no rasterization). Rust + WebGPU.
 
 ## Data Structure
 
-It's called CBEPSV64DAG. An acronym pile-up:
+It's called a CBEPSV64DAG (crazy acronym, I know):
 
 - C, clipmapped. Many trees inside one big clipmap.
 - B, bitpacked. Every value uses only as many bits as it needs.
@@ -245,16 +245,33 @@ Entry (8 bytes):
 
 # Voxel Format (u32)
 
-| Bits  | Field       | Notes                          |
-|-------|-------------|--------------------------------|
-| 31..8 | RGB color   | 24-bit linear RGB              |
-| 7..4  | Roughness   | 0 = mirror, 15 = fully diffuse |
-| 3     | Emissive    | Emits light at albedo color    |
-| 2     | Metallic    | Albedo tints specular          |
-| 1     | Transparent | Refracts, doesn't reflect      |
-| 0     | Textured    | Random color variation         |
+| Bits  | Field          | Notes                                     |
+|-------|----------------|-------------------------------------------|
+| 31..8 | RGB            | 24-bit linear RGB, tints the material     |
+| 7..4  | Material index | 0-15, indexes into the PBR material table |
+| 3..0  | Unused         |                                           |
 
 - Voxel value 0 is air. Zero state of every bitpacked array, costs nothing to store.
+- RGB is a tint on top of the material's behavior, not a raw surface color. Two voxels with the same material index but different RGB values give different shades of the same physical behavior. The material table defines how light interacts with the surface; the voxel's RGB just colors it.
+
+## Material Table
+
+16 entries, 8 bytes each, 128 bytes total. Fits permanently in L1.
+
+| Parameter            | Bits | Notes                                       |
+|----------------------|------|---------------------------------------------|
+| Roughness + metallic | 8    | High bit = metallic flag, low 7 = roughness |
+| Emissive strength    | 8    |                                             |
+| Scattering coeff     | 8    | How often rays scatter inside the medium    |
+| Absorption RGB       | 24   | 8 bits per channel                          |
+| IOR                  | 8    | Index of refraction                         |
+| Anisotropy g         | 8    | Phase function for volumetric scatter       |
+
+- Roughness and metallic share one byte. High bit is metallic, low 7 bits are roughness (0 = mirror, 127 = fully diffuse).
+- Scattering and absorption describe participating media. Scattering controls how often rays bounce inside the medium. Absorption controls how much light is lost per unit distance and at which wavelengths, which is what gives deep water its blue-green tint.
+- Anisotropy g is the Henyey-Greenstein phase function parameter. g = 0 scatters evenly in all directions (fog), g > 0 scatters forward (clouds). Clouds without forward scattering look flat and wrong — the bright halo around clouds when the sun is behind them comes entirely from this.
+- Non-volumetric materials zero out scattering, absorption, and g. They're just ignored.
+- 4 bits are left unused in the voxel format, reserved for future use.
 
 # Voxel Import Formats
 
