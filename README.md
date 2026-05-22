@@ -4,7 +4,7 @@ A voxel renderer that ray traces everything (no rasterization). Rust + WebGPU.
 
 ## Data Structure
 
-It's called CBEPSV64DAG. An acronym pile-up:
+It’s called CBEPSV64DAG. An acronym pile-up:
 
 - C, clipmapped. Many trees inside one big clipmap.
 - B, bitpacked. Every value uses only as many bits as it needs.
@@ -18,8 +18,8 @@ It's called CBEPSV64DAG. An acronym pile-up:
 ## Priorities
 
 1. Fast ray traversal, no hardware RT.
-2. Heavy compression.
-3. Quick edits.
+1. Heavy compression.
+1. Quick edits.
 
 # Storage
 
@@ -27,12 +27,12 @@ It's called CBEPSV64DAG. An acronym pile-up:
 
 Each node has two 64-bit masks, `has_child` and `is_leaf`. Together they pick one of four cell states:
 
-| has_child | is_leaf | meaning                                                |
-|:---------:|:-------:|--------------------------------------------------------|
-|     0     |    0    | empty                                                  |
-|     0     |    1    | filled, one material stored inline                     |
-|     1     |    0    | interior, has a child node with more branching         |
-|     1     |    1    | leaf, has a child node holding voxel materials         |
+|has_child|is_leaf|meaning                                       |
+|:-------:|:-----:|----------------------------------------------|
+|0        |0      |empty                                         |
+|0        |1      |filled, one material stored inline            |
+|1        |0      |interior, has a child node with more branching|
+|1        |1      |leaf, has a child node holding voxel materials|
 
 A cell is occupied if either bit is set.
 
@@ -47,25 +47,23 @@ A cell is occupied if either bit is set.
 ## Interior Node (24 bytes)
 
 ```
-has_child_lo  u32   // has_child mask bits 0..31
-has_child_hi  u32   // has_child mask bits 32..63
-is_leaf_lo    u32   // is_leaf mask bits 0..31
-is_leaf_hi    u32   // is_leaf mask bits 32..63
-ptrs          u32   // [12..0]  interior_ptr  (13 bits, into interior array)
-                    // [31..13] leaf_ptr      (19 bits, into leaf array)
-mat_offset    u32   // bit offset into chunk's materials array
+has_child   u64   // bit i set: cell i has a child node (interior or leaf)
+is_leaf     u64   // bit i set: cell i is a leaf
+ptrs        u32   // [12..0]  interior_ptr  (13 bits, into interior array)
+                  // [31..13] leaf_ptr      (19 bits, into leaf array)
+mat_offset  u32   // bit offset into chunk's materials array
 ```
 
 `popcount_below(m, slot)` means `popcount(m & ((1 << slot) - 1))`.
 
 Looking up a child at a given slot:
 
-| state                                  | location                                                                |
-|----------------------------------------|-------------------------------------------------------------------------|
-| interior (has_child=1, is_leaf=0)      | `interior_ptr + popcount_below(has_child & !is_leaf, slot)`             |
-| leaf (has_child=1, is_leaf=1)          | `leaf_ptr + popcount_below(has_child & is_leaf, slot)`                  |
-| filled (has_child=0, is_leaf=1)        | `mat_offset + popcount_below(!has_child & is_leaf, slot) * mat_width`   |
-| empty (has_child=0, is_leaf=0)         | nothing stored                                                          |
+|state                            |location                                                             |
+|---------------------------------|---------------------------------------------------------------------|
+|interior (has_child=1, is_leaf=0)|`interior_ptr + popcount_below(has_child & !is_leaf, slot)`          |
+|leaf (has_child=1, is_leaf=1)    |`leaf_ptr + popcount_below(has_child & is_leaf, slot)`               |
+|filled (has_child=0, is_leaf=1)  |`mat_offset + popcount_below(!has_child & is_leaf, slot) * mat_width`|
+|empty (has_child=0, is_leaf=0)   |nothing stored                                                       |
 
 Pointer packing:
 
@@ -78,12 +76,11 @@ Pointer packing:
 ## Leaf Node (12 bytes)
 
 ```
-occ_lo       u32   // occupancy mask bits 0..31
-occ_hi       u32   // occupancy mask bits 32..63
-mat_offset   u32   // bit offset into chunk's materials array
+occ_mask    u64   // bit i set: cell i has a voxel
+mat_offset  u32   // bit offset into chunk's materials array
 ```
 
-- One mask is enough. A leaf node's cells are voxels, so the mask is just occupancy.
+- One mask is enough. A leaf node’s cells are voxels, so the mask is just occupancy.
 - Cell `i` reads from: `mat_offset + popcount_below(occ_mask, i) * mat_width`.
 - Leaves only exist for partially-occupied regions where cells actually differ.
 - Uniform regions are stored as a `filled` cell on the parent instead. No node, one material entry.
@@ -97,14 +94,14 @@ mat_offset   u32   // bit offset into chunk's materials array
 
 `mat_width = next_pow2(ceil(log2(K)))`. Power-of-two widths mean extraction is shift and mask, never divide:
 
-| K (unique materials) | bits per slot |
-|:--------------------:|:-------------:|
-|         2            |       1       |
-|         3..4         |       2       |
-|         5..16        |       4       |
-|         17..256      |       8       |
-|       257..65536     |      16       |
-|       65537+         |      32       |
+|K (unique materials)|bits per slot|
+|:------------------:|:-----------:|
+|2                   |1            |
+|3..4                |2            |
+|5..16               |4            |
+|17..256             |8            |
+|257..65536          |16           |
+|65537+              |32           |
 
 - Both interior `mat_offset` (filled children) and leaf `mat_offset` (cells) write into the same shared per-chunk bitpacked array.
 - Mid-tree fills and bottom-level leaf entries sit side by side.
@@ -175,11 +172,11 @@ voxel_world = chunk_world + decode_path(path) * voxel_size[level]
 
 ## Per-Face Lighting
 
-Lighting is cached per voxel face in a GPU hashmap. Three passes, so reads and writes can't race and shadow rays can batch:
+Lighting is cached per voxel face in a GPU hashmap. Three passes, so reads and writes can’t race and shadow rays can batch:
 
 1. Traversal. Rays write a face ID per pixel into the G-buffer. No hashmap access yet.
-2. Lookup. Face IDs get deduped (many pixels share a face). Each unique face probes the hashmap. Hits return cached light, misses queue shadow rays. A screen-space temporal layer also compares the current face ID against last frame's at the same pixel. For static geometry this catches most lookups before the hashmap ever gets touched.
-3. Shadow rays and writeback. Uncached faces dispatch shadow rays. Results write back to the hashmap.
+1. Lookup. Face IDs get deduped (many pixels share a face). Each unique face probes the hashmap. Hits return cached light, misses queue shadow rays. A screen-space temporal layer also compares the current face ID against last frame’s at the same pixel. For static geometry this catches most lookups before the hashmap ever gets touched.
+1. Shadow rays and writeback. Uncached faces dispatch shadow rays. Results write back to the hashmap.
 
 Final shading:
 
@@ -248,14 +245,14 @@ Entry (8 bytes):
 
 # Voxel Format (u32)
 
-| Bits  | Field       | Notes                          |
-|-------|-------------|--------------------------------|
-| 31..8 | RGB color   | 24-bit linear RGB              |
-| 7..4  | Roughness   | 0 = mirror, 15 = fully diffuse |
-| 3     | Emissive    | Emits light at albedo color    |
-| 2     | Metallic    | Albedo tints specular          |
-| 1     | Transparent | Refracts, doesn't reflect      |
-| 0     | Textured    | Random color variation         |
+|Bits |Field      |Notes                         |
+|-----|-----------|------------------------------|
+|31..8|RGB color  |24-bit linear RGB             |
+|7..4 |Roughness  |0 = mirror, 15 = fully diffuse|
+|3    |Emissive   |Emits light at albedo color   |
+|2    |Metallic   |Albedo tints specular         |
+|1    |Transparent|Refracts, doesn’t reflect     |
+|0    |Textured   |Random color variation        |
 
 - Voxel value 0 is air. Zero state of every bitpacked array, costs nothing to store.
 
@@ -286,44 +283,44 @@ Entry (8 bytes):
 
 ## References
 
-| Reference | Why it's here |
-|---|---|
-| [Sparse 64-trees guide](https://dubiousconst282.github.io/2024/10/03/voxel-ray-tracing/) | Traversal algorithm: ancestor stack, coarse occupancy, octant mirroring, mantissa tricks |
-| [Aokana (2505.02017)](https://arxiv.org/abs/2505.02017) | Chunked SVDAG with LOD streaming, validates uniform-resolution chunks |
-| [Hybrid Voxel Formats (2410.14128)](https://arxiv.org/abs/2410.14128) | Systematic comparison of voxel storage formats |
-| [High-Resolution SVDAGs](https://icg.gwu.edu/sites/g/files/zaxdzs6126/files/downloads/highResolutionSparseVoxelDAGs.pdf) | The original SVDAG paper |
-| [ESVO](https://www.researchgate.net/publication/47645140_Efficient_Sparse_Voxel_Octrees) | Laine and Karras, SVO traversal and beam optimization |
-| [Voxelis Bible](https://github.com/WildPixelGames/voxelis) | SVO-DAG deep dive: batching, CoW, SoA, LOD, hash consing |
-| [Amanatides and Woo DDA](http://www.cse.yorku.ca/~amana/research/grid.pdf) | DDA for grid traversal |
-| [Erosion filter](https://blog.runevision.com/2026/03/fast-and-gorgeous-erosion-filter.html) | LOD-friendly per-point erosion |
+|Reference                                                                                                               |Why it’s here                                                                           |
+|------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------|
+|[Sparse 64-trees guide](https://dubiousconst282.github.io/2024/10/03/voxel-ray-tracing/)                                |Traversal algorithm: ancestor stack, coarse occupancy, octant mirroring, mantissa tricks|
+|[Aokana (2505.02017)](https://arxiv.org/abs/2505.02017)                                                                 |Chunked SVDAG with LOD streaming, validates uniform-resolution chunks                   |
+|[Hybrid Voxel Formats (2410.14128)](https://arxiv.org/abs/2410.14128)                                                   |Systematic comparison of voxel storage formats                                          |
+|[High-Resolution SVDAGs](https://icg.gwu.edu/sites/g/files/zaxdzs6126/files/downloads/highResolutionSparseVoxelDAGs.pdf)|The original SVDAG paper                                                                |
+|[ESVO](https://www.researchgate.net/publication/47645140_Efficient_Sparse_Voxel_Octrees)                                |Laine and Karras, SVO traversal and beam optimization                                   |
+|[Voxelis Bible](https://github.com/WildPixelGames/voxelis)                                                              |SVO-DAG deep dive: batching, CoW, SoA, LOD, hash consing                                |
+|[Amanatides and Woo DDA](http://www.cse.yorku.ca/~amana/research/grid.pdf)                                              |DDA for grid traversal                                                                  |
+|[Erosion filter](https://blog.runevision.com/2026/03/fast-and-gorgeous-erosion-filter.html)                             |LOD-friendly per-point erosion                                                          |
 
 ## Channels
 
-| Channel | Focus |
-|---|---|
-| [Douglas Dwyer](https://www.youtube.com/@DouglasDwyer) | Octo engine, Rust + WebGPU, path-traced GI |
-| [John Lin (Voxely)](https://www.youtube.com/@johnlin) | Path-traced voxel sandbox, per-face lighting |
-| [Gabe Rundlett](https://www.youtube.com/@GabeRundlett) | C++ voxel engine, Daxa/Vulkan |
-| [Ethan Gore](https://www.youtube.com/@EthanGore) | Engine dev, binary greedy meshing |
-| [VoxelRifts](https://www.youtube.com/@VoxelRifts) | Voxel programming explainers |
-| [SimonDev](https://www.youtube.com/@simondev758) | Radiance cascades |
+|Channel                                               |Focus                                       |
+|------------------------------------------------------|--------------------------------------------|
+|[Douglas Dwyer](https://www.youtube.com/@DouglasDwyer)|Octo engine, Rust + WebGPU, path-traced GI  |
+|[John Lin (Voxely)](https://www.youtube.com/@johnlin) |Path-traced voxel sandbox, per-face lighting|
+|[Gabe Rundlett](https://www.youtube.com/@GabeRundlett)|C++ voxel engine, Daxa/Vulkan               |
+|[Ethan Gore](https://www.youtube.com/@EthanGore)      |Engine dev, binary greedy meshing           |
+|[VoxelRifts](https://www.youtube.com/@VoxelRifts)     |Voxel programming explainers                |
+|[SimonDev](https://www.youtube.com/@simondev758)      |Radiance cascades                           |
 
 ## Projects
 
-| Project | Description |
-|---|---|
-| [VoxelRT](https://github.com/dubiousconst282/VoxelRT) | Tree64, brickmap, XBrickMap benchmarks |
-| [Voxelis](https://github.com/WildPixelGames/voxelis) | Rust SVO-DAG with batching, CoW, LOD |
-| [Octo Engine](https://github.com/DouglasDwyer/octo-release) | Rust + WebGPU voxel engine |
-| [tree64](https://github.com/expenses/tree64) | Rust sparse 64-tree |
-| [HashDAG](https://github.com/Phyronnaz/HashDAG) | Reference implementation |
-| [gvox](https://github.com/GabeRundlett/gvox) | Voxel format translation library |
+|Project                                                    |Description                           |
+|-----------------------------------------------------------|--------------------------------------|
+|[VoxelRT](https://github.com/dubiousconst282/VoxelRT)      |Tree64, brickmap, XBrickMap benchmarks|
+|[Voxelis](https://github.com/WildPixelGames/voxelis)       |Rust SVO-DAG with batching, CoW, LOD  |
+|[Octo Engine](https://github.com/DouglasDwyer/octo-release)|Rust + WebGPU voxel engine            |
+|[tree64](https://github.com/expenses/tree64)               |Rust sparse 64-tree                   |
+|[HashDAG](https://github.com/Phyronnaz/HashDAG)            |Reference implementation              |
+|[gvox](https://github.com/GabeRundlett/gvox)               |Voxel format translation library      |
 
 ## More
 
-| Resource | Description |
-|---|---|
-| [Voxel.Wiki](https://voxel.wiki) | Community hub |
-| [Voxely.net blog](https://voxely.net/blog/) | John Lin's design posts |
-| [Brickmap rundown](https://uygarb.dev/posts/0003_brickmap_rundown/) | Brickmap and brickgrid explanation |
-| [Branchless DDA (ShaderToy)](https://www.shadertoy.com/view/XdtcRM) | Branchless 3D DDA reference |
+|Resource                                                           |Description                       |
+|-------------------------------------------------------------------|----------------------------------|
+|[Voxel.Wiki](https://voxel.wiki)                                   |Community hub                     |
+|[Voxely.net blog](https://voxely.net/blog/)                        |John Lin’s design posts           |
+|[Brickmap rundown](https://uygarb.dev/posts/0003_brickmap_rundown/)|Brickmap and brickgrid explanation|
+|[Branchless DDA (ShaderToy)](https://www.shadertoy.com/view/XdtcRM)|Branchless 3D DDA reference       |
