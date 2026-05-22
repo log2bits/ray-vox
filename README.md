@@ -38,32 +38,50 @@ Heavily modified sparse voxel data structure. The acronym is an abomination: **C
   Occupied children = branch_mask | terminal_mask.
 
 - Materials array is fully packed, doubling as LOD storage and leaf storage.
-- AoS node layout: internal nodes are 20 bytes (5 u32s), leaf nodes are 8 bytes (2 u32s). All fields for a node are fetched together instead of 5 separate SoA array reads per node visit. Internal and leaf nodes live in separate arrays.
+- AoS node layout: internal nodes are 24 bytes (6 u32s), leaf nodes are 12 bytes (3 u32s). All fields for a node are fetched in a single load instead of touching 5 separate SoA arrays per node visit. Internal and leaf nodes live in separate arrays, addressed by a single packed pointer field on the internal node.
 - DAG allows identical subtrees to share memory
 - Materials are stored in a per-chunk bitpacked array with a LUT. Bit width scales with unique material count: a chunk with 2 materials uses 1 bit per slot, 4 materials uses 2 bits, up to 8 bits for 256 materials.
 - The LUT maps compact indices to full voxel values, so the hot traversal path only touches small indices.
 - Persistent chunks (player-edited) are stored permanently. Procedural chunks are generated on demand and discarded when out of range.
 
-### Internal Node Format (20 bytes)
+### Internal Node Format (24 bytes)
 
 ```
-[31..0]  branch_lo   u32  - branch mask bits 0-31  (children that are interior or leaf nodes)
-[31..0]  branch_hi   u32  - branch mask bits 32-63
-[31..0]  terminal_lo u32  - terminal mask bits 0-31 (children that are leaf or filled nodes)
-[31..0]  terminal_hi u32  - terminal mask bits 32-63
-[31..0]  child_ptr   u32  - index of first child in whichever array (interior or leaf)
+[31..0]   branch_lo     u32  - branch mask bits 0-31  (children that are interior or leaf nodes)
+[31..0]   branch_hi     u32  - branch mask bits 32-63
+[31..0]   terminal_lo   u32  - terminal mask bits 0-31 (children that are leaf or filled nodes)
+[31..0]   terminal_hi   u32  - terminal mask bits 32-63
+[12..0]   interior_ptr       - 13 bits, base index into interior node array
+[31..13]  leaf_ptr           - 19 bits, base index into leaf node array
+[31..0]   mat_offset    u32  - bit offset into chunk's materials array for filled children
 ```
 
-The four combinations of branch and terminal bits determine child type. Interior nodes are indexed from the interior node array, leaf nodes from the leaf node array, and filled nodes contribute a single entry directly to the materials array. No node is allocated for filled children.
+The four combinations of branch and terminal bits determine child type. Each kind is found by a popcount on the appropriate sub-mask:
 
-### Leaf Node Format (8 bytes)
+-  branch &  terminal -> leaf child node:     `leaf_ptr     + popcount(branch &  terminal & below)`
+-  branch & !terminal -> interior child:      `interior_ptr + popcount(branch & !terminal & below)`
+- !branch &  terminal -> filled (1 material): `mat_offset   + popcount(!branch &  terminal & below) * material_width`
+- !branch & !terminal -> empty.
+
+No node is allocated for filled children - they contribute a single entry directly to the materials array.
+
+The interior and leaf pointers are packed into one u32 because they don't both need 32 bits: a chunk has at most 64^2 + 64 + 1 = 4161 interior nodes (fits in 13 bits) and ~64^3 + 4160 = 266K leaf nodes (fits in 19 bits). Together: exactly 32 bits, no waste. Extraction is one shift and one mask. Static asserts on these bounds catch any future depth/branching change.
+
+### Leaf Node Format (12 bytes)
 
 ```
-[31..0]  occ_lo     u32  - occupancy mask bits 0-31
-[31..0]  occ_hi     u32  - occupancy mask bits 32-63
+[31..0]  occ_lo      u32  - occupancy mask bits 0-31
+[31..0]  occ_hi      u32  - occupancy mask bits 32-63
+[31..0]  mat_offset  u32  - bit offset into chunk's materials array
 ```
 
-Leaf nodes exist only for partially occupied regions (branch + terminal). Fully uniform regions use the filled encoding instead and store no node at all, only a single material entry in the parent's materials array.
+Leaf nodes have no branches by definition, so a single occupancy mask suffices - it doubles as the terminal mask. Every occupied cell at slot `i` maps to a material entry at bit offset:
+
+```
+mat_offset + popcount(occ_mask & ((1 << i) - 1)) * material_width
+```
+
+Leaf nodes exist only for partially-occupied regions where individual cells differ. Fully uniform regions use the filled encoding in the parent instead and store no node at all, only a single material entry in the parent's materials array.
 
 ### Material Array (per chunk)
 
@@ -77,7 +95,7 @@ Leaf nodes exist only for partially occupied regions (branch + terminal). Fully 
 
 Bit width is a single chunk-level uniform, fixed to the next power of 2 so indices can be extracted with a bitshift and mask rather than a division. At 2 materials: 1 bit/slot. At 3-4 materials: 2 bits/slot. At 5-16 materials: 4 bits/slot. At 17-256 materials: 8 bits/slot.
 
-The array is fully packed - only occupied slots have entries, indexed via `child_ptr + popcount_below(occ_mask, slot)`. Uniform nodes higher up in the tree write into the same array as bottom-level leaf nodes.
+The bitpacked region is fully packed - only occupied entries take space. Each internal node addresses its filled children via its own `mat_offset`, and each leaf node addresses its cells via its own `mat_offset`. Both write into the same shared per-chunk bitpacked array - filled regions higher in the tree and bottom-level leaf node entries are stored side-by-side.
 
 ### World Clipmap
 - World stores chunks in a 28 level clipmap. (spans the 2^64 coordinate space)
