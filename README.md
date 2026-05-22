@@ -25,14 +25,14 @@ It's called CBEPSV64DAG. An acronym pile-up:
 
 ## Chunks
 
-Each node has two 64-bit masks, `branch_mask` and `terminal_mask`. Together they pick one of four cell states:
+Each node has two 64-bit masks, `has_child` and `is_leaf`. Together they pick one of four cell states:
 
-| branch | terminal | meaning                                       |
-|:------:|:--------:|-----------------------------------------------|
-|   0    |    0     | empty                                         |
-|   0    |    1     | filled, one material, no child node stored    |
-|   1    |    0     | interior child node                           |
-|   1    |    1     | leaf child node                               |
+| has_child | is_leaf | meaning                                                |
+|:---------:|:-------:|--------------------------------------------------------|
+|     0     |    0    | empty                                                  |
+|     0     |    1    | filled, one material stored inline                     |
+|     1     |    0    | interior, has a child node with more branching         |
+|     1     |    1    | leaf, has a child node holding voxel materials         |
 
 A cell is occupied if either bit is set.
 
@@ -47,25 +47,25 @@ A cell is occupied if either bit is set.
 ## Interior Node (24 bytes)
 
 ```
-branch_lo    u32   // branch mask bits 0..31
-branch_hi    u32   // branch mask bits 32..63
-terminal_lo  u32   // terminal mask bits 0..31
-terminal_hi  u32   // terminal mask bits 32..63
-ptrs         u32   // [12..0]  interior_ptr  (13 bits, into interior array)
-                   // [31..13] leaf_ptr      (19 bits, into leaf array)
-mat_offset   u32   // bit offset into chunk's materials array
+has_child_lo  u32   // has_child mask bits 0..31
+has_child_hi  u32   // has_child mask bits 32..63
+is_leaf_lo    u32   // is_leaf mask bits 0..31
+is_leaf_hi    u32   // is_leaf mask bits 32..63
+ptrs          u32   // [12..0]  interior_ptr  (13 bits, into interior array)
+                    // [31..13] leaf_ptr      (19 bits, into leaf array)
+mat_offset    u32   // bit offset into chunk's materials array
 ```
 
 `popcount_below(m, slot)` means `popcount(m & ((1 << slot) - 1))`.
 
 Looking up a child at a given slot:
 
-| state                            | location                                                            |
-|----------------------------------|---------------------------------------------------------------------|
-| interior (branch=1, terminal=0)  | `interior_ptr + popcount_below(branch & !terminal, slot)`           |
-| leaf (branch=1, terminal=1)      | `leaf_ptr + popcount_below(branch & terminal, slot)`                |
-| filled (branch=0, terminal=1)    | `mat_offset + popcount_below(!branch & terminal, slot) * mat_width` |
-| empty (branch=0, terminal=0)     | nothing stored                                                      |
+| state                                  | location                                                                |
+|----------------------------------------|-------------------------------------------------------------------------|
+| interior (has_child=1, is_leaf=0)      | `interior_ptr + popcount_below(has_child & !is_leaf, slot)`             |
+| leaf (has_child=1, is_leaf=1)          | `leaf_ptr + popcount_below(has_child & is_leaf, slot)`                  |
+| filled (has_child=0, is_leaf=1)        | `mat_offset + popcount_below(!has_child & is_leaf, slot) * mat_width`   |
+| empty (has_child=0, is_leaf=0)         | nothing stored                                                          |
 
 Pointer packing:
 
@@ -83,7 +83,7 @@ occ_hi       u32   // occupancy mask bits 32..63
 mat_offset   u32   // bit offset into chunk's materials array
 ```
 
-- One mask is enough. It doubles as occupancy and terminal, since a leaf has no branches.
+- One mask is enough. A leaf node's cells are voxels, so the mask is just occupancy.
 - Cell `i` reads from: `mat_offset + popcount_below(occ_mask, i) * mat_width`.
 - Leaves only exist for partially-occupied regions where cells actually differ.
 - Uniform regions are stored as a `filled` cell on the parent instead. No node, one material entry.
