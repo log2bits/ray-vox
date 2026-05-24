@@ -1,11 +1,11 @@
 pub struct InteriorNode {
-	has_child: u64,
-	is_leaf: u64,
-	node_offsets: u32,
-	material_offset: u32,
+	pub has_child: u64,
+	pub is_leaf: u64,
+	pub node_offsets: u32,
+	pub material_offset: u32,
 }
 
 pub struct LeafNode {
-	occupancy: u64,
-	material_offset: u32,
+	pub occupancy: u64,
+	pub material_offset: u32,
 }

@@ -52,7 +52,6 @@ impl PackedVec {
 		self.len = new_len;
 		let bits_used = self.len * self.bits;
 		let words_needed = ((bits_used + 31) / 32) as usize;
-		// Zero stale bits in last word so derived PartialEq stays correct
 		let leftover = bits_used % 32;
 		if leftover > 0 {
 			if let Some(w) = self.words.get_mut(words_needed.saturating_sub(1)) {
@@ -72,7 +71,6 @@ impl PackedVec {
 		if word_idx >= self.words.len() {
 			self.words.push(0);
 		}
-		// u32 shift naturally drops overflow bits, correct for straddle
 		self.words[word_idx] |= value << bit_offset;
 
 		let bits_written = 32 - bit_offset;
@@ -118,7 +116,6 @@ impl PackedVec {
 	pub fn insert(&mut self, index: u32, value: u32) {
 		assert!(index <= self.len);
 		self.ensure_width(value);
-		// Extend storage for one more element
 		let bit_pos = self.len * self.bits;
 		let word_idx = (bit_pos / 32) as usize;
 		let bit_offset = bit_pos % 32;
@@ -129,7 +126,6 @@ impl PackedVec {
 			self.words.push(0);
 		}
 		self.len += 1;
-		// Shift elements right
 		let mut i = self.len - 1;
 		while i > index {
 			let v = self.get(i - 1);
@@ -142,7 +138,6 @@ impl PackedVec {
 	pub fn remove(&mut self, index: u32) -> u32 {
 		assert!(index < self.len);
 		let value = self.get(index);
-		// Shift elements left
 		let mut i = index;
 		while i < self.len - 1 {
 			let v = self.get(i + 1);
@@ -150,7 +145,6 @@ impl PackedVec {
 			i += 1;
 		}
 		self.len -= 1;
-		// Trim storage, zeroing stale bits first
 		let bits_used = self.len * self.bits;
 		let words_needed = ((bits_used + 31) / 32) as usize;
 		let leftover = bits_used % 32;

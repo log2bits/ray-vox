@@ -1,7 +1,8 @@
 pub mod chunk_pool;
 pub mod clipmap;
 pub mod pbr;
-pub use crate::util::Lut;
+
+use crate::util::Lut;
 use chunk_pool::ChunkPool;
 pub use pbr::Pbr;
 

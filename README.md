@@ -111,19 +111,18 @@ mat_offset  u32   // bit offset into chunk's materials array
 
 ## World Clipmap
 
-- 28 levels covering the 2^64 coord space.
-- Each level is 8^3 chunks, scaling 4x outward.
-- Top level is 4^3 (exact 2^64 fit).
-- All other levels are 8^3 with a 2^3 inner cutout that the next finer level fills.
+- 11 levels (0–10) covering the i32 coord space (2^31 units, ±1 billion).
+- All levels are 8^3 chunks with a 2^3 inner cutout that the next finer level fills.
+- `chunk_size(L) = 256 * 4^L`. At level 10: 2^28 per chunk, 8 * 2^28 = 2^31 total. Exact fit.
 - LOD boundary is always at least 3 cells from the camera. Coarse LOD never shows up close.
-- Storage: 28 KB of chunk handles plus 1.8 KB occupancy bitmask.
-- Chunk handles are u16. Max around 14K chunks across all levels, well under the 65K cap.
+- Storage: ~11 KB of chunk handles plus 704 bytes occupancy bitmask.
+- Chunk handles are u16. Max 5544 chunks across all levels, well under the 65K cap.
 
 ## Chunk Handle (u16)
 
 ```
-[15..14]  unused
-[13..9]   level    5 bits  (0..27)
+[15..13]  unused
+[12..9]   level    4 bits  (0..10)
 [8..6]    x        3 bits  (0..7)
 [5..3]    y        3 bits  (0..7)
 [2..0]    z        3 bits  (0..7)
