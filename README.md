@@ -92,17 +92,20 @@ mat_offset  u32   // bit offset into chunk's materials array
 [bitpacked indices]          // mat_width bits each, popcount-indexed
 ```
 
-`mat_width = next_pow2(ceil(log2(K)))`. Power-of-two widths mean extraction is shift and mask, never divide:
+`mat_width = ceil(log2(K))`. Exact bit widths minimise memory and maximise cache usage:
 
 | K (unique materials) | bits per slot |
 |:--------------------:|:-------------:|
 |         2            |       1       |
 |         3..4         |       2       |
-|         5..16        |       4       |
-|         17..256      |       8       |
-|       257..65536     |      16       |
+|         5..8         |       3       |
+|         9..16        |       4       |
+|         17..32       |       5       |
+|         ...          |      ...      |
 |       65537+         |      32       |
 
+- Word index and bit offset use shifts and masks, never division: `word = bit_pos >> 5`, `offset = bit_pos & 31`.
+- Entries can straddle a 32-bit word boundary. Extraction always loads two words and masks unconditionally, keeping the code branchless and warp-coherent.
 - Both interior `mat_offset` (filled children) and leaf `mat_offset` (cells) write into the same shared per-chunk bitpacked array.
 - Mid-tree fills and bottom-level leaf entries sit side by side.
 
@@ -110,8 +113,8 @@ mat_offset  u32   // bit offset into chunk's materials array
 
 - 28 levels covering the 2^64 coord space.
 - Each level is 8^3 chunks, scaling 4x outward.
-- Top level is 4*4*4 (exact 2^64 fit).
-- All other levels are 8*8*8 with a 2*2*2 inner cutout that the next finer level fills.
+- Top level is 4^3 (exact 2^64 fit).
+- All other levels are 8^3 with a 2^3 inner cutout that the next finer level fills.
 - LOD boundary is always at least 3 cells from the camera. Coarse LOD never shows up close.
 - Storage: 28 KB of chunk handles plus 1.8 KB occupancy bitmask.
 - Chunk handles are u16. Max around 14K chunks across all levels, well under the 65K cap.
