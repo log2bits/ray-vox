@@ -43,6 +43,7 @@ A cell is occupied if either bit is set.
 - DAG dedupes identical subtrees.
 - Per-chunk material LUT. Bit width scales from 1 bit (2 materials) up to 32 bits (unique per voxel). LUT entries are full voxel values, so the hot traversal path only touches small indices.
 - Persistent chunks (player edits) stick around. Procedural chunks generate on demand and discard out of range.
+- A chunk with no nodes and an empty materials array is entirely air. A chunk with no nodes and exactly one material entry is entirely that material. Both are valid leaf states requiring no tree traversal.
 
 ## Interior Node (24 bytes)
 
@@ -111,18 +112,19 @@ mat_offset  u32   // bit offset into chunk's materials array
 
 ## World Clipmap
 
-- 11 levels (0–10) covering the i32 coord space (2^31 units, ±1 billion).
-- All levels are 8^3 chunks with a 2^3 inner cutout that the next finer level fills.
-- `chunk_size(L) = 256 * 4^L`. At level 10: 2^28 per chunk, 8 * 2^28 = 2^31 total. Exact fit.
+- 11 depths (0–10) covering the i32 coord space (2^31 units, ±1 billion).
+- Depth 0 is the coarsest, depth 10 is the finest. Same convention as the chunk tree.
+- All depths are 8^3 chunks with a 2^3 inner cutout that the next finer depth fills.
+- `chunk_size(d) = 256 * 4^(10 - d)`. At depth 0: 2^28 per chunk, 8 * 2^28 = 2^31 total. Exact fit.
 - LOD boundary is always at least 3 cells from the camera. Coarse LOD never shows up close.
 - Storage: ~11 KB of chunk handles plus 704 bytes occupancy bitmask.
-- Chunk handles are u16. Max 5544 chunks across all levels, well under the 65K cap.
+- Chunk handles are u16. Max 5544 chunks across all depths, well under the 65K cap.
 
 ## Chunk Handle (u16)
 
 ```
 [15..13]  unused
-[12..9]   level    4 bits  (0..10)
+[12..9]   depth    4 bits  (0..10)
 [8..6]    x        3 bits  (0..7)
 [5..3]    y        3 bits  (0..7)
 [2..0]    z        3 bits  (0..7)
@@ -131,8 +133,8 @@ mat_offset  u32   // bit offset into chunk's materials array
 World-space recovery is O(1), no lookup table:
 
 ```
-chunk_world = clipmap_origin[level] + (x, y, z) * chunk_size[level]
-voxel_world = chunk_world + decode_path(path) * voxel_size[level]
+chunk_world = clipmap_origin[depth] + (x, y, z) * chunk_size[depth]
+voxel_world = chunk_world + decode_path(path) * voxel_size[depth]
 ```
 
 - Handle encodes the full clipmap position directly.
@@ -156,6 +158,13 @@ voxel_world = chunk_world + decode_path(path) * voxel_size[level]
 - Chunks live in a pool with a free list, since chunk size varies a lot.
 - Chunk offset table maps the u16 handle to the actual memory offset.
 - Edits only re-upload the affected chunk.
+- CPU side stores chunks as typed structs (`Vec<InteriorNode>`, `Vec<LeafNode>`, material array).
+- GPU side is one flat contiguous buffer. Upload serializes the scattered heap allocations into the packed GPU layout.
+- On discrete GPU: CPU → staging buffer → VRAM via PCIe.
+- On unified memory: CPU → GPU-visible buffer directly, driver elides the transfer.
+- wgpu's `StagingBelt` abstracts both paths — same code runs optimally on all hardware.
+- Node types are `bytemuck::Pod` so serialization is raw `memcpy` with no per-field encoding.
+- Dirty tracking: only chunks modified since last frame are re-uploaded.
 
 # Rendering
 

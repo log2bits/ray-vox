@@ -20,7 +20,6 @@ winit = "0.30"
 egui = "0.30"
 egui-wgpu = "0.30"
 egui-winit = "0.30"
-rdxsort = "0.3.0"
 
 [profile.release]
 opt-level = 3
