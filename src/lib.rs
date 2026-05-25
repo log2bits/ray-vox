@@ -6,5 +6,5 @@ pub mod util;
 pub mod volumes;
 pub mod world;
 
-pub use chunk::Chunk;
+pub use chunk::{Chunk, Compressed, Editing};
 pub use world::World;

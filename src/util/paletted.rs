@@ -1,6 +1,7 @@
 use crate::util::Lut;
 use crate::util::PackedVec;
 
+#[derive(Clone)]
 pub struct PalettedVec<T> {
 	pub lut: Lut<T>,
 	pub indices: PackedVec,

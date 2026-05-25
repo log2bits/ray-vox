@@ -4,7 +4,7 @@ use std::ops::Range;
 
 const SORTED_RUN_THRESHOLD: u32 = 64;
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Edits {
 	pub edits: Vec<(Path, Material)>, // (path, material)
 	pub batches: Vec<EditBatch>,
@@ -13,6 +13,7 @@ pub struct Edits {
 	run_len: u32,
 }
 
+#[derive(Clone)]
 pub enum EditBatch {
 	Sorted(Range<u32>),
 	Unsorted(Range<u32>),
