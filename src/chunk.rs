@@ -1,22 +1,21 @@
-mod edit;
-mod material;
-mod node;
+pub mod compact;
+pub mod edit;
+pub mod material;
+pub mod node;
+pub mod rebuild;
 
-use crate::chunk::edit::Edits;
-use crate::chunk::node::InteriorNode;
-use crate::chunk::node::LeafNode;
 use crate::util::PalettedVec;
+use edit::Edits;
+use edit::Path;
+use material::Material;
+use node::InteriorNode;
+use node::LeafNode;
 
 pub struct Chunk {
 	pub interior_nodes: Vec<InteriorNode>,
 	pub leaf_nodes: Vec<LeafNode>,
-	pub materials: PalettedVec,
+	pub materials: PalettedVec<Material>,
 	pub edits: Edits,
-}
-
-enum StackFrame {
-	Interior(u32),
-	Leaf(u32),
 }
 
 impl Chunk {
@@ -47,12 +46,48 @@ impl Chunk {
 			let slice = &edits.edits[start..end];
 			self.apply_batch(slice);
 		}
+		self.compact();
 	}
 
-	pub fn apply_batch(&mut self, batch: &[(u32, u32)]) {
-		let mut stack: Vec<(u32, u8)> = Vec::new(); // (node_index, slot)
-		let mut prev_path = 0u32;
-		for (path, material) in batch {}
+	pub fn apply_batch(&mut self, batch: &[(Path, Material)]) {
+		// Root edits sort to the front (path value 0). The last one determines the
+		// starting state; any edits before it are overridden.
+		let root_edit_count = batch.partition_point(|(p, _): &(Path, Material)| p.is_root());
+		let sub_batch = &batch[root_edit_count..];
+
+		if root_edit_count > 0 {
+			let (_, fill_mat) = batch[root_edit_count - 1];
+			self.interior_nodes.clear();
+			self.leaf_nodes.clear();
+			self.materials.clear();
+			if !fill_mat.is_air() {
+				self.materials.push(fill_mat);
+			}
+			if sub_batch.is_empty() {
+				return;
+			}
+		}
+
+		if sub_batch.is_empty() {
+			return;
+		}
+
+		// Determine the current state of the chunk before applying sub_batch.
+		// If the chunk has no tree yet but a single fill material, we expand that fill
+		// into a virtual fully-filled root as we descend into it.
+		let old_root = self.interior_nodes.last().copied();
+		let expand_fill = if old_root.is_none() && self.materials.len() == 1 {
+			Some(self.materials.get(0))
+		} else {
+			None
+		};
+
+		self.rebuild_interior(old_root, expand_fill, 0, sub_batch);
+		// The new root is now the last element of interior_nodes.
+	}
+
+	pub fn is_root_leaf(&self) -> bool {
+		self.interior_nodes.is_empty() && self.leaf_nodes.len() == 1
 	}
 
 	pub fn is_uniform(&self) -> bool {

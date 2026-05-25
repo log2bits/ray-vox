@@ -1,14 +1,14 @@
-use std::ops::Range;
-
+use crate::chunk::Material;
 use radsort::sort_by_key;
+use std::ops::Range;
 
 const SORTED_RUN_THRESHOLD: u32 = 64;
 
 #[derive(Default)]
 pub struct Edits {
-	pub edits: Vec<(u32, u32)>, // (path, material)
+	pub edits: Vec<(Path, Material)>, // (path, material)
 	pub batches: Vec<EditBatch>,
-	last_path: u32,
+	last_path: Path,
 	run_start: u32,
 	run_len: u32,
 }
@@ -37,19 +37,19 @@ impl Edits {
 		Self {
 			edits: Vec::new(),
 			batches: Vec::new(),
-			last_path: 0,
+			last_path: Path::from(0u32),
 			run_start: 0,
 			run_len: 0,
 		}
 	}
 
-	pub fn push(&mut self, path: impl Into<u32>, material: u32) {
-		let path = path.into();
+	pub fn push(&mut self, path: Path, material: Material) {
+		let path: Path = path.into();
 		let idx = self.edits.len() as u32;
 		self.edits.push((path, material));
 
-		let depth_changed = idx == 0 || path_depth(path) != path_depth(self.last_path);
-		let out_of_order = !depth_changed && path < self.last_path;
+		let depth_changed = idx == 0 || path.depth() != self.last_path.depth();
+		let out_of_order = !depth_changed && path.0 < self.last_path.0;
 
 		if depth_changed {
 			self.batches.push(EditBatch::Unsorted(idx..idx + 1));
@@ -77,7 +77,7 @@ impl Edits {
 		for batch in &mut self.batches {
 			if let EditBatch::Unsorted(range) = batch {
 				let slice = &mut self.edits[range.start as usize..range.end as usize];
-				sort_by_key(slice, |&(path, _)| path);
+				sort_by_key(slice, |&(path, _)| u32::from(path));
 				*batch = EditBatch::Sorted(range.clone());
 			}
 		}
@@ -97,10 +97,7 @@ impl Edits {
 	}
 }
 
-fn path_depth(path: u32) -> u8 {
-	path.to_be_bytes().iter().take_while(|&&b| b != 0).count() as u8
-}
-
+#[derive(Default, Clone, Copy)]
 pub struct Path(u32);
 
 impl From<[u8; 4]> for Path {
@@ -115,6 +112,12 @@ impl From<Path> for u32 {
 	}
 }
 
+impl From<u32> for Path {
+	fn from(v: u32) -> Self {
+		Path(v)
+	}
+}
+
 impl Path {
 	pub fn from_coords(position: [u8; 3], depth: u8) -> Self {
 		let [x, y, z] = position;
@@ -126,5 +129,26 @@ impl Path {
 		let b2 = if depth > 2 { slot(2) } else { 0 };
 		let b3 = if depth > 3 { slot(0) } else { 0 };
 		Path(u32::from_be_bytes([b0, b1, b2, b3]))
+	}
+
+	pub fn depth(&self) -> u8 {
+		self.0.to_be_bytes().iter().take_while(|&&b| b != 0).count() as u8
+	}
+
+	pub fn slot_at(&self, depth: u8) -> u8 {
+		self.0.to_be_bytes()[depth as usize] - 1
+	}
+
+	pub fn is_root(&self) -> bool {
+		self.0 == 0
+	}
+
+	pub fn common_depth(&self, other: &Path) -> usize {
+		self.0
+			.to_be_bytes()
+			.iter()
+			.zip(other.0.to_be_bytes().iter())
+			.take_while(|(a, b)| a == b)
+			.count()
 	}
 }

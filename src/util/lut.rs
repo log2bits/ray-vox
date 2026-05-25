@@ -29,4 +29,8 @@ impl<T: PartialEq + Copy> Lut<T> {
 				self.values.len() - 1
 			}) as u32
 	}
+
+	pub fn clear(&mut self) {
+		self.values.clear();
+	}
 }

@@ -1,10 +1,12 @@
+#[derive(Copy, Clone, Default)]
 pub struct InteriorNode {
 	has_child: u64,
 	is_leaf: u64,
-	node_offsets: u32,
+	node_offsets: u32, // packed: [12..0] interior_ptr (13 bits), [31..13] leaf_ptr (19 bits)
 	material_offset: u32,
 }
 
+#[derive(Copy, Clone, Default)]
 pub struct LeafNode {
 	occupancy: u64,
 	material_offset: u32,
@@ -19,12 +21,47 @@ pub enum CellState {
 
 impl InteriorNode {
 	pub fn new() -> Self {
-		Self {
-			has_child: 0,
-			is_leaf: 0,
-			node_offsets: 0,
-			material_offset: 0,
-		}
+		Self::default()
+	}
+
+	pub fn has_child(&self) -> u64 {
+		self.has_child
+	}
+
+	pub fn set_has_child(&mut self, mask: u64) {
+		self.has_child = mask;
+	}
+
+	pub fn is_leaf(&self) -> u64 {
+		self.is_leaf
+	}
+
+	pub fn set_is_leaf(&mut self, mask: u64) {
+		self.is_leaf = mask;
+	}
+
+	pub fn material_offset(&self) -> u32 {
+		self.material_offset
+	}
+
+	pub fn set_material_offset(&mut self, offset: u32) {
+		self.material_offset = offset;
+	}
+
+	pub fn interior_offset(&self) -> u32 {
+		self.node_offsets & 0x1FFF
+	}
+
+	pub fn set_interior_offset(&mut self, offset: u32) {
+		self.node_offsets = (self.node_offsets & 0xFFFFE000) | (offset & 0x1FFF);
+	}
+
+	pub fn leaf_offset(&self) -> u32 {
+		(self.node_offsets >> 13) & 0x7FFFF
+	}
+
+	pub fn set_leaf_offset(&mut self, offset: u32) {
+		self.node_offsets = (self.node_offsets & 0x1FFF) | ((offset & 0x7FFFF) << 13);
 	}
 
 	pub fn state(&self, slot: u8) -> CellState {
@@ -70,7 +107,7 @@ impl InteriorNode {
 		(self.occupancy() >> slot) & 1 != 0
 	}
 
-	pub fn is_empty(&self, slot: u8) -> bool {
+	pub fn is_empty_slot(&self, slot: u8) -> bool {
 		(self.occupancy() >> slot) & 1 == 0
 	}
 
@@ -84,30 +121,6 @@ impl InteriorNode {
 
 	pub fn filled_count(&self) -> u32 {
 		(!self.has_child & self.is_leaf).count_ones()
-	}
-
-	pub fn interior_offset(&self) -> u32 {
-		self.node_offsets & 0x1FFF
-	}
-
-	pub fn set_interior_offset(&mut self, offset: u32) {
-		self.node_offsets = (self.node_offsets & 0xFFFFE000) | (offset & 0x1FFF);
-	}
-
-	pub fn leaf_offset(&self) -> u32 {
-		(self.node_offsets >> 13) & 0x7FFFF
-	}
-
-	pub fn set_leaf_offset(&mut self, offset: u32) {
-		self.node_offsets = (self.node_offsets & 0x1FFF) | ((offset & 0x7FFFF) << 13);
-	}
-
-	pub fn material_offset(&self) -> u32 {
-		self.material_offset
-	}
-
-	pub fn set_material_offset(&mut self, offset: u32) {
-		self.material_offset = offset;
 	}
 
 	pub fn interior_child_index(&self, slot: u8) -> u32 {
@@ -125,14 +138,23 @@ impl InteriorNode {
 
 impl LeafNode {
 	pub fn new() -> Self {
-		Self {
-			occupancy: 0,
-			material_offset: 0,
-		}
+		Self::default()
 	}
 
 	pub fn occupancy(&self) -> u64 {
 		self.occupancy
+	}
+
+	pub fn set_occupancy(&mut self, mask: u64) {
+		self.occupancy = mask;
+	}
+
+	pub fn material_offset(&self) -> u32 {
+		self.material_offset
+	}
+
+	pub fn set_material_offset(&mut self, offset: u32) {
+		self.material_offset = offset;
 	}
 
 	pub fn occupied_count(&self) -> u32 {
@@ -143,7 +165,7 @@ impl LeafNode {
 		(self.occupancy >> slot) & 1 != 0
 	}
 
-	pub fn is_empty(&self, slot: u8) -> bool {
+	pub fn is_empty_slot(&self, slot: u8) -> bool {
 		(self.occupancy >> slot) & 1 == 0
 	}
 
@@ -151,20 +173,8 @@ impl LeafNode {
 		self.occupancy |= 1u64 << slot;
 	}
 
-	pub fn set_empty(&mut self, slot: u8) {
+	pub fn clear_occupied(&mut self, slot: u8) {
 		self.occupancy &= !(1u64 << slot);
-	}
-
-	pub fn set_occupancy(&mut self, occupancy: u64) {
-		self.occupancy = occupancy;
-	}
-
-	pub fn material_offset(&self) -> u32 {
-		self.material_offset
-	}
-
-	pub fn set_material_offset(&mut self, offset: u32) {
-		self.material_offset = offset;
 	}
 
 	pub fn material_index(&self, slot: u8) -> u32 {

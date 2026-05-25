@@ -1,12 +1,12 @@
 use crate::util::Lut;
 use crate::util::PackedVec;
 
-pub struct PalettedVec {
-	pub lut: Lut<u32>,
+pub struct PalettedVec<T> {
+	pub lut: Lut<T>,
 	pub indices: PackedVec,
 }
 
-impl PalettedVec {
+impl<T: PartialEq + Copy + Into<u32>> PalettedVec<T> {
 	pub fn new() -> Self {
 		Self {
 			lut: Lut::new(),
@@ -14,12 +14,12 @@ impl PalettedVec {
 		}
 	}
 
-	pub fn push(&mut self, value: u32) {
+	pub fn push(&mut self, value: T) {
 		let idx = self.lut.get_or_add(value);
 		self.indices.push(idx);
 	}
 
-	pub fn get(&self, index: u32) -> u32 {
+	pub fn get(&self, index: u32) -> T {
 		self.lut.get(self.indices.get(index))
 	}
 
@@ -29,5 +29,10 @@ impl PalettedVec {
 
 	pub fn is_empty(&self) -> bool {
 		self.indices.is_empty()
+	}
+
+	pub fn clear(&mut self) {
+		self.lut.clear();
+		self.indices.clear();
 	}
 }
