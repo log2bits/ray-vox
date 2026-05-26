@@ -36,4 +36,8 @@ impl<T: PartialEq + Copy + Into<u32>> PalettedVec<T> {
 		self.lut.clear();
 		self.indices.clear();
 	}
+
+	pub fn bit_width(&self) -> u32 {
+		self.indices.bits
+	}
 }

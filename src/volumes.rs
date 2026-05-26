@@ -11,9 +11,9 @@ pub use sphere::Sphere;
 pub enum Containment {
 	/// Volume does not overlap this AABB at all.
 	Empty,
-	/// Volume partially overlaps — subdivide and test children.
+	/// Volume partially overlaps - subdivide and test children.
 	Partial,
-	/// Volume fully contains this AABB — fill it without recursing.
+	/// Volume fully contains this AABB - fill it without recursing.
 	Full,
 }
 
@@ -30,8 +30,6 @@ pub trait Volume {
 pub fn stamp(volume: &impl Volume, edits: &mut Edits) {
 	stamp_cell(volume, edits, [0, 0, 0], 0);
 }
-
-
 
 /// `depth` 0 = whole chunk (256³), 1–4 mirror the tree levels.
 fn stamp_cell(volume: &impl Volume, edits: &mut Edits, origin: [i32; 3], depth: u8) {
@@ -51,7 +49,7 @@ fn stamp_cell(volume: &impl Volume, edits: &mut Edits, origin: [i32; 3], depth: 
 		}
 		Containment::Partial => {
 			if depth == 4 {
-				// Single voxel — Partial shouldn't happen but treat as Full.
+				// Single voxel - Partial shouldn't happen but treat as Full.
 				let path =
 					Path::from_coords([origin[0] as u8, origin[1] as u8, origin[2] as u8], 4);
 				edits.push(path, volume.material());

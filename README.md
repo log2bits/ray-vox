@@ -162,7 +162,7 @@ voxel_world = chunk_world + decode_path(path) * voxel_size[depth]
 - GPU side is one flat contiguous buffer. Upload serializes the scattered heap allocations into the packed GPU layout.
 - On discrete GPU: CPU → staging buffer → VRAM via PCIe.
 - On unified memory: CPU → GPU-visible buffer directly, driver elides the transfer.
-- wgpu's `StagingBelt` abstracts both paths — same code runs optimally on all hardware.
+- wgpu's `StagingBelt` abstracts both paths - same code runs optimally on all hardware.
 - Node types are `bytemuck::Pod` so serialization is raw `memcpy` with no per-field encoding.
 - Dirty tracking: only chunks modified since last frame are re-uploaded.
 
@@ -280,7 +280,7 @@ Entry (8 bytes):
 
 - Roughness and metallic share one byte. High bit is metallic, low 7 bits are roughness (0 = mirror, 127 = fully diffuse).
 - Scattering and absorption describe participating media. Scattering controls how often rays bounce inside the medium. Absorption controls how much light is lost per unit distance and at which wavelengths, which is what gives deep water its blue-green tint.
-- Anisotropy g is the Henyey-Greenstein phase function parameter. g = 0 scatters evenly in all directions (fog), g > 0 scatters forward (clouds). Clouds without forward scattering look flat and wrong — the bright halo around clouds when the sun is behind them comes entirely from this.
+- Anisotropy g is the Henyey-Greenstein phase function parameter. g = 0 scatters evenly in all directions (fog), g > 0 scatters forward (clouds). Clouds without forward scattering look flat and wrong - the bright halo around clouds when the sun is behind them comes entirely from this.
 - Non-volumetric materials zero out scattering, absorption, and g. They're just ignored.
 - 4 bits are left unused in the voxel format, reserved for future use.
 

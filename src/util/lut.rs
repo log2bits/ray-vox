@@ -33,4 +33,8 @@ impl<T: PartialEq + Copy> Lut<T> {
 	pub fn clear(&mut self) {
 		self.values.clear();
 	}
+
+	pub fn bytes(&self) -> u32 {
+		24 + (std::mem::size_of::<T>() * self.values.len()) as u32
+	}
 }

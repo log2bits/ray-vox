@@ -29,10 +29,6 @@ impl PackedVec {
 		}
 	}
 
-	pub fn bytes(&self) -> usize {
-		32 + self.words.len() * 4
-	}
-
 	pub fn len(&self) -> u32 {
 		self.len
 	}
