@@ -1,18 +1,31 @@
 use std::array::from_fn;
 
+use crate::Chunk;
+
 pub struct Clipmap {
 	pub occupancy: [[u32; 16]; 11],
 	pub origin: [i32; 3],
+	pub pending_remap: Vec<(ChunkHandle, ChunkHandle)>,
+	pub pending_origin: [i32; 3],
 }
 
 impl Clipmap {
-	pub fn depth_origin(&self, depth: u8) -> [i32; 3] {
+	pub fn level_origin(&self, depth: u8) -> [i32; 3] {
 		let chunk_size = chunk_size_at_depth(depth) as i64;
 		from_fn(|i| {
 			let origin = self.origin[i] as i64;
 			let snapped = ((origin + chunk_size / 2) / chunk_size) * chunk_size;
 			(snapped - chunk_size * 4) as i32
 		})
+	}
+
+	pub fn set_origin(&mut self, origin: [i32; 3]) {
+		self.pending_origin = origin;
+	}
+
+	pub fn set_occupied(&mut self, handle: ChunkHandle) {
+		// TODO
+		// self.occupancy[handle.depth()]
 	}
 }
 
