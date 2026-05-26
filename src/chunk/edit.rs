@@ -14,23 +14,9 @@ pub struct Edits {
 }
 
 #[derive(Clone)]
-pub enum EditBatch {
-	Sorted(Range<u32>),
-	Unsorted(Range<u32>),
-}
-
-impl EditBatch {
-	pub fn range(&self) -> &Range<u32> {
-		match self {
-			Self::Sorted(r) | Self::Unsorted(r) => r,
-		}
-	}
-
-	pub fn range_mut(&mut self) -> &mut Range<u32> {
-		match self {
-			Self::Sorted(r) | Self::Unsorted(r) => r,
-		}
-	}
+pub struct EditBatch {
+	pub range: Range<u32>,
+	pub sorted: bool,
 }
 
 impl Edits {
@@ -53,19 +39,19 @@ impl Edits {
 		let out_of_order = !depth_changed && path.0 < self.last_path.0;
 
 		if depth_changed {
-			self.batches.push(EditBatch::Unsorted(idx..idx + 1));
+			self.batches.push(EditBatch { range: idx..idx + 1, sorted: false });
 			self.run_start = idx;
 			self.run_len = 1;
 		} else if out_of_order {
 			self.run_start = idx;
 			self.run_len = 1;
 			match self.batches.last_mut() {
-				Some(EditBatch::Unsorted(range)) => range.end = idx + 1,
-				_ => self.batches.push(EditBatch::Unsorted(idx..idx + 1)),
+				Some(batch) if !batch.sorted => batch.range.end = idx + 1,
+				_ => self.batches.push(EditBatch { range: idx..idx + 1, sorted: false }),
 			}
 		} else {
 			self.run_len += 1;
-			self.batches.last_mut().unwrap().range_mut().end = idx + 1;
+			self.batches.last_mut().unwrap().range.end = idx + 1;
 			if self.run_len == SORTED_RUN_THRESHOLD {
 				self.promote_run_to_sorted();
 			}
@@ -76,24 +62,24 @@ impl Edits {
 
 	pub fn sort(&mut self) {
 		for batch in &mut self.batches {
-			if let EditBatch::Unsorted(range) = batch {
-				let slice = &mut self.edits[range.start as usize..range.end as usize];
+			if !batch.sorted {
+				let slice = &mut self.edits[batch.range.start as usize..batch.range.end as usize];
 				sort_by_key(slice, |&(path, _)| u32::from(path));
-				*batch = EditBatch::Sorted(range.clone());
+				batch.sorted = true;
 			}
 		}
 	}
 
 	fn promote_run_to_sorted(&mut self) {
 		let last = self.batches.last_mut().unwrap();
-		let batch_start = last.range().start;
-		let batch_end = last.range().end;
+		let batch_start = last.range.start;
+		let batch_end = last.range.end;
 		if batch_start < self.run_start {
-			*last = EditBatch::Unsorted(batch_start..self.run_start);
-			self.batches
-				.push(EditBatch::Sorted(self.run_start..batch_end));
+			last.range = batch_start..self.run_start;
+			self.batches.push(EditBatch { range: self.run_start..batch_end, sorted: true });
 		} else {
-			*last = EditBatch::Sorted(self.run_start..batch_end);
+			last.range = self.run_start..batch_end;
+			last.sorted = true;
 		}
 	}
 }

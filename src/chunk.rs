@@ -123,8 +123,8 @@ impl MutableChunk {
 		let mut edits = std::mem::take(&mut self.edits);
 		edits.sort();
 		for batch in &edits.batches {
-			let start = batch.range().start as usize;
-			let end = batch.range().end as usize;
+			let start = batch.range.start as usize;
+			let end = batch.range.end as usize;
 			let slice = &edits.edits[start..end];
 			self.apply_batch(slice);
 		}

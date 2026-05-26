@@ -1,7 +1,7 @@
 use std::array::from_fn;
 
 pub struct Clipmap {
-	pub occupancy: [DepthOccupancy; 11],
+	pub occupancy: [[u32; 16]; 11],
 	pub origin: [i32; 3],
 }
 
@@ -14,10 +14,6 @@ impl Clipmap {
 			(snapped - chunk_size * 4) as i32
 		})
 	}
-}
-
-pub struct DepthOccupancy {
-	pub bits: [u32; 16],
 }
 
 /// A u16 handle encoding a chunk's clipmap position.
