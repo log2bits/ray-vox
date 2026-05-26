@@ -1,7 +1,7 @@
 use super::edit::Path;
 use super::material::Material;
 use super::node::{CellState, InteriorNodeWide, LeafNode};
-use super::{Chunk, Editing};
+use super::MutableChunk;
 
 /// Outcome of rebuilding a single tree position. Used both as a recursive return value
 /// and as the per-slot intermediate when assembling a parent.
@@ -75,7 +75,7 @@ impl SlotAccumulator {
 	}
 }
 
-impl Chunk<Editing> {
+impl MutableChunk {
 	#[inline]
 	pub(super) fn rebuild_interior(
 		&mut self,
@@ -232,7 +232,7 @@ impl Chunk<Editing> {
 			}
 			CellState::Interior => {
 				let lod = self.materials.get(old.material_index(slot));
-				let node = self.state.interior_nodes[old.interior_child_index(slot) as usize];
+				let node = self.interior_nodes[old.interior_child_index(slot) as usize];
 				RebuildResult::Interior(lod, node)
 			}
 			CellState::Leaf => {
@@ -300,7 +300,7 @@ impl Chunk<Editing> {
 			let old_leaf = old_child_idx.map(|i| self.leaf_nodes[i as usize]);
 			self.rebuild_leaf(old_leaf, child_expand_fill, slot_edits)
 		} else {
-			let old_interior = old_child_idx.map(|i| self.state.interior_nodes[i as usize]);
+			let old_interior = old_child_idx.map(|i| self.interior_nodes[i as usize]);
 			self.rebuild_interior(old_interior, child_expand_fill, tree_depth + 1, slot_edits)
 		}
 	}
@@ -310,10 +310,10 @@ impl Chunk<Editing> {
 		let n_interior = (accum.has_child & !accum.is_leaf).count_ones() as usize;
 		let n_leaf = (accum.has_child & accum.is_leaf).count_ones() as usize;
 
-		let interior_ptr = self.state.interior_nodes.len() as u32;
+		let interior_ptr = self.interior_nodes.len() as u32;
 		let leaf_ptr = self.leaf_nodes.len() as u32;
-		self.state.interior_nodes.resize_with(
-			self.state.interior_nodes.len() + n_interior,
+		self.interior_nodes.resize_with(
+			self.interior_nodes.len() + n_interior,
 			InteriorNodeWide::default,
 		);
 		self.leaf_nodes
@@ -331,7 +331,7 @@ impl Chunk<Editing> {
 			let has = (accum.has_child >> slot) & 1 != 0;
 			let is_leaf_bit = (accum.is_leaf >> slot) & 1 != 0;
 			if has && !is_leaf_bit {
-				self.state.interior_nodes[(interior_ptr + interior_rank) as usize] =
+				self.interior_nodes[(interior_ptr + interior_rank) as usize] =
 					accum.interior_nodes[slot as usize];
 				interior_rank += 1;
 			} else if has {

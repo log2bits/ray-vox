@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use ray_vox::{
 	chunk::{
-		Chunk, Compressed, Editing,
+		Chunk,
 		edit::{Edits, Path},
 		material::Material,
 		node::{CellState, InteriorNode, LeafNode},
@@ -43,24 +43,19 @@ fn sphere_edits(radius: f32, material: Material) -> Edits {
 	edits
 }
 
-fn apply_edits(chunk: &mut Chunk<Editing>, edits: Edits) {
-	chunk.state.edits = edits;
-	chunk.apply_edits();
-}
-
-fn get_voxel(chunk: &Chunk<Compressed>, pos: [u8; 3]) -> Option<Material> {
+fn get_voxel(chunk: &Chunk, pos: [u8; 3]) -> Option<Material> {
 	if chunk.is_empty() {
 		return None;
 	}
 	if chunk.is_uniform() {
 		return Some(chunk.materials.get(0));
 	}
-	if chunk.state.interior_nodes.is_empty() {
+	if chunk.interior_nodes.is_empty() {
 		return None;
 	}
 
 	let path = Path::from_coords(pos, 4);
-	let interior = &chunk.state.interior_nodes;
+	let interior = &chunk.interior_nodes;
 	let leaves = &chunk.leaf_nodes;
 	let mut node_idx = (interior.len() - 1) as u32;
 
@@ -77,7 +72,7 @@ fn get_voxel(chunk: &Chunk<Compressed>, pos: [u8; 3]) -> Option<Material> {
 			}
 			CellState::Leaf => {
 				let leaf_idx = node.leaf_child_index(slot);
-				let leaf_slot = path.slot_at(3);
+				let leaf_slot = path.slot_at(depth + 1);
 				let leaf = leaves[leaf_idx as usize];
 				return if leaf.is_occupied(leaf_slot) {
 					Some(chunk.materials.get(leaf.material_index(leaf_slot)))
@@ -90,8 +85,8 @@ fn get_voxel(chunk: &Chunk<Compressed>, pos: [u8; 3]) -> Option<Material> {
 	None
 }
 
-fn assert_chunk_valid(chunk: &Chunk<Compressed>) {
-	let interior = &chunk.state.interior_nodes;
+fn assert_chunk_valid(chunk: &Chunk) {
+	let interior = &chunk.interior_nodes;
 	let leaves = &chunk.leaf_nodes;
 	if interior.is_empty() {
 		return;
@@ -175,14 +170,8 @@ fn fmt_pct(pct: f64) -> String {
 	format!("{:.10}%", pct)
 }
 
-fn print_chunk_stats(label: &str, chunk: &Chunk<Compressed>) {
-	let mat_count = chunk.materials.lut.len() as usize;
-	let mat_bytes = mat_count * std::mem::size_of::<Material>();
-	let interior_b = chunk.state.interior_nodes.len() * std::mem::size_of::<InteriorNode>();
-	let leaf_b = chunk.leaf_nodes.len() * std::mem::size_of::<LeafNode>();
-	let idx_b = chunk.materials.indices.words.len() * 4;
-	let tree_bytes = interior_b + leaf_b + idx_b;
-	let total_bytes = tree_bytes + mat_bytes;
+fn print_chunk_stats(label: &str, chunk: &Chunk) {
+	let total_bytes = chunk.gpu_size_bytes() as usize;
 
 	let occupied = chunk.stored_volume().max(1);
 	let bpv = (total_bytes * 8) as f64 / occupied as f64;
@@ -194,25 +183,9 @@ fn print_chunk_stats(label: &str, chunk: &Chunk<Compressed>) {
 	let total_vol = SIDE * SIDE * SIDE;
 	let pct_empty = (total_vol - occupied.min(total_vol)) as f64 / total_vol as f64 * 100.0;
 
-	let bits_per_idx: usize = if mat_count <= 2 {
-		1
-	} else if mat_count <= 4 {
-		2
-	} else if mat_count <= 16 {
-		4
-	} else if mat_count <= 256 {
-		8
-	} else if mat_count <= 65536 {
-		16
-	} else {
-		32
-	};
-
 	let flat_u32 = SIDE * SIDE * SIDE * 4;
-	let lut_flat = (SIDE * SIDE * SIDE * bits_per_idx as u64 + 7) / 8 + mat_bytes as u64;
-	let lut_esvodag = total_bytes as u64;
 
-	let r_total = flat_u32 as f64 / lut_esvodag.max(1) as f64;
+	let r_total = flat_u32 as f64 / total_bytes as f64;
 
 	// val: material index bits (single PalettedVec, same at all levels)
 	// child: interior ptr = 13 bits (depths 0-1), leaf ptr = 19 bits (depth 2), 0 at leaf level
@@ -249,19 +222,16 @@ fn print_edit_depths(label: &str, edits: &Edits) {
 fn run_tests() {
 	// 1. Empty chunk stays empty after no-op stamp.
 	{
-		let mut chunk = Chunk::<Editing>::new();
-		apply_edits(&mut chunk, Edits::new());
-		let chunk = chunk.compress();
+		let chunk = Chunk::new().apply_edits(Edits::new());
 		assert!(chunk.is_empty());
 		assert_eq!(chunk.materials.lut.len(), 0);
 	}
 
 	// 2. Single voxel edit adds exactly one material entry.
 	{
-		let mut chunk = Chunk::<Editing>::new();
-		chunk.push_edit(Path::from_coords([0, 0, 0], 4), blue());
-		chunk.apply_edits();
-		let chunk = chunk.compress();
+		let mut edits = Edits::new();
+		edits.push(Path::from_coords([0, 0, 0], 4), blue());
+		let chunk = Chunk::new().apply_edits(edits);
 		assert!(!chunk.is_empty());
 		assert_eq!(chunk.materials.lut.len(), 1);
 		assert_chunk_valid(&chunk);
@@ -269,62 +239,54 @@ fn run_tests() {
 
 	// 3. Two different materials produce two material entries.
 	{
-		let mut chunk = Chunk::<Editing>::new();
-		apply_edits(&mut chunk, sphere_edits(80.0, blue()));
-		apply_edits(&mut chunk, sphere_edits(40.0, red()));
-		let chunk = chunk.compress();
+		let chunk = Chunk::new()
+			.apply_edits(sphere_edits(80.0, blue()))
+			.apply_edits(sphere_edits(40.0, red()));
 		assert_eq!(chunk.materials.lut.len(), 2);
 		assert_chunk_valid(&chunk);
 	}
 
 	// 4. Same material applied twice still produces one LUT entry.
 	{
-		let mut chunk = Chunk::<Editing>::new();
-		apply_edits(&mut chunk, sphere_edits(80.0, blue()));
-		apply_edits(&mut chunk, sphere_edits(40.0, blue()));
-		let chunk = chunk.compress();
+		let chunk = Chunk::new()
+			.apply_edits(sphere_edits(80.0, blue()))
+			.apply_edits(sphere_edits(40.0, blue()));
 		assert_eq!(chunk.materials.lut.len(), 1);
 		assert_chunk_valid(&chunk);
 	}
 
 	// 5. Sphere produces a valid chunk.
 	{
-		let mut chunk = Chunk::<Editing>::new();
-		apply_edits(&mut chunk, sphere_edits(100.0, blue()));
-		let chunk = chunk.compress();
+		let chunk = Chunk::new().apply_edits(sphere_edits(100.0, blue()));
 		assert!(!chunk.is_empty());
 		assert_chunk_valid(&chunk);
 	}
 
 	// 6. Sphere then air-sphere produces a valid (possibly empty) chunk.
 	{
-		let mut chunk = Chunk::<Editing>::new();
-		apply_edits(&mut chunk, sphere_edits(100.0, blue()));
-		apply_edits(&mut chunk, sphere_edits(100.0, Material::air()));
-		let chunk = chunk.compress();
+		let chunk = Chunk::new()
+			.apply_edits(sphere_edits(100.0, blue()))
+			.apply_edits(sphere_edits(100.0, Material::air()));
 		assert_chunk_valid(&chunk);
 	}
 
 	// 7. Delete a single voxel from an otherwise solid chunk.
 	{
-		let mut chunk = Chunk::<Editing>::new();
-		apply_edits(&mut chunk, sphere_edits(512.0, blue()));
-		chunk.push_edit(Path::from_coords([0, 0, 0], 4), Material::air());
-		chunk.apply_edits();
-		let chunk = chunk.compress();
+		let mut edits = Edits::new();
+		edits.push(Path::from_coords([0, 0, 0], 4), Material::air());
+		let chunk = Chunk::new()
+			.apply_edits(sphere_edits(512.0, blue()))
+			.apply_edits(edits);
 		assert!(!chunk.is_empty());
 		assert_chunk_valid(&chunk);
 	}
 
 	// 8. Idempotency: applying same edits twice gives same structure.
 	{
-		let mut c1 = Chunk::<Editing>::new();
-		let mut c2 = Chunk::<Editing>::new();
-		apply_edits(&mut c1, sphere_edits(60.0, blue()));
-		apply_edits(&mut c2, sphere_edits(60.0, blue()));
-		apply_edits(&mut c2, sphere_edits(60.0, blue()));
-		let c1 = c1.compress();
-		let c2 = c2.compress();
+		let c1 = Chunk::new().apply_edits(sphere_edits(60.0, blue()));
+		let c2 = Chunk::new()
+			.apply_edits(sphere_edits(60.0, blue()))
+			.apply_edits(sphere_edits(60.0, blue()));
 		assert_chunk_valid(&c1);
 		assert_chunk_valid(&c2);
 		assert_eq!(c1.materials.lut.len(), c2.materials.lut.len());
@@ -332,55 +294,53 @@ fn run_tests() {
 
 	// 9. get_voxel returns the correct material after a voxel edit.
 	{
-		let mut chunk = Chunk::<Editing>::new();
 		let v = blue();
-		chunk.push_edit(Path::from_coords([10, 20, 30], 4), v);
-		chunk.apply_edits();
-		let chunk = chunk.compress();
+		let mut edits = Edits::new();
+		edits.push(Path::from_coords([10, 20, 30], 4), v);
+		let chunk = Chunk::new().apply_edits(edits);
 		assert_eq!(get_voxel(&chunk, [10, 20, 30]), Some(v));
 		assert_eq!(get_voxel(&chunk, [10, 20, 31]), None);
 	}
 
 	// 10. Root-level fill produces a uniform chunk (no tree nodes).
 	{
-		let mut chunk = Chunk::<Editing>::new();
-		chunk.push_edit(Path::from(0u32), blue()); // root fill
-		chunk.apply_edits();
-		let chunk = chunk.compress();
+		let mut edits = Edits::new();
+		edits.push(Path::from(0u32), blue()); // root fill
+		let chunk = Chunk::new().apply_edits(edits);
 		assert!(chunk.is_uniform());
-		assert!(chunk.state.interior_nodes.is_empty());
+		assert!(chunk.interior_nodes.is_empty());
 	}
 
 	// 11. Root-level air over filled chunk empties it.
 	{
-		let mut chunk = Chunk::<Editing>::new();
-		apply_edits(&mut chunk, sphere_edits(100.0, blue()));
-		chunk.push_edit(Path::from(0u32), Material::air()); // root air fill
-		chunk.apply_edits();
-		let chunk = chunk.compress();
+		let mut air_edits = Edits::new();
+		air_edits.push(Path::from(0u32), Material::air()); // root air fill
+		let chunk = Chunk::new()
+			.apply_edits(sphere_edits(100.0, blue()))
+			.apply_edits(air_edits);
 		assert!(chunk.is_empty());
 	}
 
 	// 12. Sub-voxel edit after root fill expands the tree.
 	{
-		let mut chunk = Chunk::<Editing>::new();
-		chunk.push_edit(Path::from(0u32), blue());
-		chunk.apply_edits();
-		chunk.push_edit(Path::from_coords([0, 0, 0], 4), red());
-		chunk.apply_edits();
-		let chunk = chunk.compress();
+		let mut fill_edits = Edits::new();
+		fill_edits.push(Path::from(0u32), blue());
+		let mut sub_edits = Edits::new();
+		sub_edits.push(Path::from_coords([0, 0, 0], 4), red());
+		let chunk = Chunk::new()
+			.apply_edits(fill_edits)
+			.apply_edits(sub_edits);
 		assert!(!chunk.is_uniform());
 		assert_chunk_valid(&chunk);
 	}
 
 	// 13. A single voxel produces expected tree depth (≥3 interior nodes).
 	{
-		let mut chunk = Chunk::<Editing>::new();
-		chunk.push_edit(Path::from_coords([0, 0, 0], 4), blue());
-		chunk.apply_edits();
-		let chunk = chunk.compress();
+		let mut edits = Edits::new();
+		edits.push(Path::from_coords([0, 0, 0], 4), blue());
+		let chunk = Chunk::new().apply_edits(edits);
 		assert!(
-			chunk.state.interior_nodes.len() >= 3,
+			chunk.interior_nodes.len() >= 3,
 			"expected ≥3 interior nodes for single voxel"
 		);
 		assert_eq!(chunk.leaf_nodes.len(), 1);
@@ -389,31 +349,25 @@ fn run_tests() {
 
 	// 14. Max-fill sphere has ≤ MAX_INTERIOR_NODES interior nodes.
 	{
-		let mut chunk = Chunk::<Editing>::new();
-		apply_edits(&mut chunk, sphere_edits(512.0, blue()));
-		apply_edits(&mut chunk, sphere_edits(64.0, red()));
-		let chunk = chunk.compress();
+		let chunk = Chunk::new()
+			.apply_edits(sphere_edits(512.0, blue()))
+			.apply_edits(sphere_edits(64.0, red()));
 		assert!(
-			chunk.state.interior_nodes.len() <= 4161,
+			chunk.interior_nodes.len() <= 4161,
 			"interior nodes {} exceed theoretical max 4161",
-			chunk.state.interior_nodes.len()
+			chunk.interior_nodes.len()
 		);
 		assert_chunk_valid(&chunk);
 	}
 
 	// 15. Re-stamping a sphere gives the same node count (idempotent structure).
 	{
-		let mut c1 = Chunk::<Editing>::new();
-		apply_edits(&mut c1, sphere_edits(60.0, blue()));
-		let c1 = c1.compress();
-
-		let mut c2 = c1.clone().decompress();
-		apply_edits(&mut c2, sphere_edits(60.0, blue()));
-		let c2 = c2.compress();
+		let c1 = Chunk::new().apply_edits(sphere_edits(60.0, blue()));
+		let c2 = c1.clone().apply_edits(sphere_edits(60.0, blue()));
 
 		assert_eq!(
-			c1.state.interior_nodes.len(),
-			c2.state.interior_nodes.len(),
+			c1.interior_nodes.len(),
+			c2.interior_nodes.len(),
 			"idempotent stamp should produce same tree"
 		);
 		assert_eq!(c1.leaf_nodes.len(), c2.leaf_nodes.len());
@@ -421,35 +375,34 @@ fn run_tests() {
 
 	// 16. Two materials are both retrievable via get_voxel.
 	{
-		let mut chunk = Chunk::<Editing>::new();
-		chunk.push_edit(Path::from_coords([0, 0, 0], 4), blue());
-		chunk.push_edit(Path::from_coords([255, 255, 255], 4), red());
-		chunk.apply_edits();
-		let chunk = chunk.compress();
+		let mut edits = Edits::new();
+		edits.push(Path::from_coords([0, 0, 0], 4), blue());
+		edits.push(Path::from_coords([255, 255, 255], 4), red());
+		let chunk = Chunk::new().apply_edits(edits);
 		assert_eq!(get_voxel(&chunk, [0, 0, 0]), Some(blue()));
 		assert_eq!(get_voxel(&chunk, [255, 255, 255]), Some(red()));
 		assert_eq!(get_voxel(&chunk, [128, 128, 128]), None);
 		assert_chunk_valid(&chunk);
 	}
 
-	// 17. Filling a 4³ leaf region with one material collapses to Filled on the parent.
+	// 17. Filling a 4³ leaf region with one material collapses properly.
+	// During editing the region collapses to a Filled slot (no leaf nodes in the wide
+	// tree).  After compression, childless interior nodes are demoted to leaf nodes,
+	// so the compressed chunk may have exactly one leaf node.  What must NOT happen
+	// is the chunk being treated as empty or producing an invalid tree.
 	{
-		let mut chunk = Chunk::<Editing>::new();
+		let mut edits = Edits::new();
 		// Fill a 4³ leaf region (positions [0..4, 0..4, 0..4]) with blue.
 		for x in 0u8..4 {
 			for y in 0u8..4 {
 				for z in 0u8..4 {
-					chunk.push_edit(Path::from_coords([x, y, z], 4), blue());
+					edits.push(Path::from_coords([x, y, z], 4), blue());
 				}
 			}
 		}
-		chunk.apply_edits();
-		// The leaf at [0,0,0] depth-3 should collapse to a Filled slot - no leaf nodes.
-		assert_eq!(
-			chunk.leaf_nodes.len(),
-			0,
-			"uniform 4³ region should collapse to Filled, not Leaf"
-		);
+		let chunk = Chunk::new().apply_edits(edits);
+		assert!(!chunk.is_empty(), "uniform 4³ region should not be empty");
+		assert_chunk_valid(&chunk);
 	}
 
 	println!("all tests passed");
@@ -474,8 +427,76 @@ fn fmt_duration(d: std::time::Duration) -> String {
 	}
 }
 
-fn make_grid_spheres() -> Chunk<Compressed> {
-	let mut chunk = Chunk::<Editing>::new();
+fn green() -> Material {
+	Material::from_rgb_pbr_id([60, 120, 40], 0)
+}
+fn brown() -> Material {
+	Material::from_rgb_pbr_id([100, 70, 40], 0)
+}
+
+// Simple value noise: hash two ints into a float in [-1, 1].
+fn hash2(x: i32, z: i32) -> f32 {
+	let h = (x.wrapping_mul(374761393) ^ z.wrapping_mul(668265263)).wrapping_mul(1274126177);
+	(h & 0xFFFF) as f32 / 32767.5 - 1.0
+}
+
+// Bilinear value noise over a [0,16) grid with grid spacing 4.
+fn noise2(x: u8, z: u8) -> f32 {
+	let gx = (x / 4) as i32;
+	let gz = (z / 4) as i32;
+	let tx = (x % 4) as f32 / 4.0;
+	let tz = (z % 4) as f32 / 4.0;
+	// Smoothstep.
+	let sx = tx * tx * (3.0 - 2.0 * tx);
+	let sz = tz * tz * (3.0 - 2.0 * tz);
+	let v00 = hash2(gx, gz);
+	let v10 = hash2(gx + 1, gz);
+	let v01 = hash2(gx, gz + 1);
+	let v11 = hash2(gx + 1, gz + 1);
+	let top = v00 + sx * (v10 - v00);
+	let bot = v01 + sx * (v11 - v01);
+	top + sz * (bot - top)
+}
+
+// Returns the surface y for a given column. Range [6, 10] roughly.
+fn terrain_height(x: u8, z: u8) -> u8 {
+	let h = 8.0 + 2.0 * noise2(x, z);
+	h.round().clamp(0.0, 15.0) as u8
+}
+
+fn make_minecraft_chunk() -> Chunk {
+	let mut edits = Edits::new();
+	for bx in 0u8..16 {
+		for bz in 0u8..16 {
+			let surface = terrain_height(bx, bz); // block-space y, 0..15
+			for by in 0u8..surface {
+				// Each 16x16x16 block aligns to a depth-2 node.
+				edits.push(Path::from_coords([bx * 16, by * 16, bz * 16], 2), brown());
+			}
+			edits.push(
+				Path::from_coords([bx * 16, surface * 16, bz * 16], 2),
+				green(),
+			);
+		}
+	}
+	Chunk::new().apply_edits(edits)
+}
+
+fn make_flat_minecraft_chunk() -> Chunk {
+	let mut edits = Edits::new();
+	for bx in 0u8..16 {
+		for bz in 0u8..16 {
+			for by in 0u8..8 {
+				edits.push(Path::from_coords([bx * 16, by * 16, bz * 16], 2), brown());
+			}
+			edits.push(Path::from_coords([bx * 16, 8 * 16, bz * 16], 2), green());
+		}
+	}
+	Chunk::new().apply_edits(edits)
+}
+
+fn make_grid_spheres() -> Chunk {
+	let mut chunk = Chunk::new();
 	for x in 0..16i32 {
 		for y in 0..16i32 {
 			for z in 0..16i32 {
@@ -484,11 +505,11 @@ fn make_grid_spheres() -> Chunk<Compressed> {
 					y as f32 * 16.0 + 8.0,
 					z as f32 * 16.0 + 8.0,
 				];
-				apply_edits(&mut chunk, sphere_edits_center(7.0, center, blue()));
+				chunk = chunk.apply_edits(sphere_edits_center(7.0, center, blue()));
 			}
 		}
 	}
-	chunk.compress()
+	chunk
 }
 
 fn sphere_edits_center(radius: f32, center: [f32; 3], material: Material) -> Edits {
@@ -516,33 +537,28 @@ fn main() {
 
 	println!("\nsphere stats:");
 	for &r in &radii {
-		let mut chunk = Chunk::<Editing>::new();
-		apply_edits(&mut chunk, sphere_edits(r, blue()));
-		print_chunk_stats(&format!("r={r:3}"), &chunk.compress());
+		let chunk = Chunk::new().apply_edits(sphere_edits(r, blue()));
+		print_chunk_stats(&format!("r={r:3}"), &chunk);
 	}
 
 	println!("\napply_sphere_fresh:");
 	for &r in &radii {
 		let edits = sphere_edits(r, blue());
 		let d = time_one(|| {
-			let mut chunk = Chunk::<Editing>::new();
-			apply_edits(&mut chunk, edits.clone());
-			std::hint::black_box(chunk.compress());
+			let chunk = Chunk::new().apply_edits(edits.clone());
+			std::hint::black_box(chunk);
 		});
 		println!("  r={r:3}: {}", fmt_duration(d));
 	}
 
-	let mut full_chunk_edit = Chunk::<Editing>::new();
-	apply_edits(&mut full_chunk_edit, sphere_edits(512.0, blue()));
-	let full_chunk = full_chunk_edit.compress();
+	let full_chunk = Chunk::new().apply_edits(sphere_edits(512.0, blue()));
 
 	println!("\napply_sphere_onto_full:");
 	for &r in &radii {
 		let edits = sphere_edits(r, blue());
 		let d = time_one(|| {
-			let mut chunk = full_chunk.clone().decompress();
-			apply_edits(&mut chunk, edits.clone());
-			std::hint::black_box(chunk.compress());
+			let chunk = full_chunk.clone().apply_edits(edits.clone());
+			std::hint::black_box(chunk);
 		});
 		println!("  r={r:3}: {}", fmt_duration(d));
 	}
@@ -552,11 +568,26 @@ fn main() {
 
 	println!("\nsingle r=7 sphere:");
 	{
-		let mut chunk = Chunk::<Editing>::new();
-		apply_edits(&mut chunk, sphere_edits(7.0, blue()));
-		print_chunk_stats("stats", &chunk.compress());
+		let chunk = Chunk::new().apply_edits(sphere_edits(7.0, blue()));
+		print_chunk_stats("stats", &chunk);
 	}
 
 	println!("\ngrid spheres (4096 × r=7, aligned for DAG dedup):");
 	print_chunk_stats("stats", &make_grid_spheres());
+
+	println!("\nminecraft-like flat world (16×16 columns, 2-material, 8 brown + 1 green):");
+	let flat = make_flat_minecraft_chunk();
+	debug_chunk("flat", &flat);
+	print_chunk_stats("stats", &flat);
+
+	println!("\nminecraft-like terrain (16×16 columns, 2-material, perlin ±2):");
+	print_chunk_stats("stats", &make_minecraft_chunk());
+}
+
+fn debug_chunk(label: &str, chunk: &Chunk) {
+    println!("  {label}: {} interior nodes, {} leaf nodes, {} mat entries",
+        chunk.interior_nodes.len(),
+        chunk.leaf_nodes.len(),
+        chunk.materials.lut.len(),
+    );
 }

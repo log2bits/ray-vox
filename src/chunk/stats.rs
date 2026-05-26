@@ -1,11 +1,10 @@
-use super::material::Material;
-use super::node::{CellState, InteriorNode, LeafNode};
-use super::{Chunk, Compressed};
+use super::node::CellState;
+use super::Chunk;
 
 const DEPTH: u32 = 4;
 const SIDE: u64 = 256;
 
-impl Chunk<Compressed> {
+impl Chunk {
 	/// Voxels actually filled with some material (any non-air, any depth).
 	pub fn stored_volume(&self) -> u64 {
 		if self.is_empty() {
@@ -14,18 +13,18 @@ impl Chunk<Compressed> {
 		if self.is_uniform() {
 			return SIDE.pow(3);
 		}
-		if self.state.interior_nodes.is_empty() {
+		if self.interior_nodes.is_empty() {
 			return 0;
 		}
 		self.subtree_voxels(self.root_idx(), 0)
 	}
 
 	fn root_idx(&self) -> u32 {
-		(self.state.interior_nodes.len() - 1) as u32
+		(self.interior_nodes.len() - 1) as u32
 	}
 
 	fn subtree_voxels(&self, idx: u32, depth: u32) -> u64 {
-		let n = self.state.interior_nodes[idx as usize];
+		let n = self.interior_nodes[idx as usize];
 		let mut total = 0u64;
 		let mut mask = n.occupancy();
 		while mask != 0 {
