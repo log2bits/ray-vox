@@ -188,10 +188,10 @@ impl Chunk<Editing> {
 				self.materials.clear();
 				self.materials.push(mat);
 			}
-			rebuild::RebuildResult::Interior(new_root) => {
+			rebuild::RebuildResult::Interior(_, new_root) => {
 				self.state.interior_nodes.push(new_root);
 			}
-			rebuild::RebuildResult::Leaf(_) => unreachable!(),
+			rebuild::RebuildResult::Leaf(..) => unreachable!(),
 		}
 	}
 
