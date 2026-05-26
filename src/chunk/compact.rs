@@ -26,6 +26,7 @@ pub fn compress(src: Chunk<Editing>) -> Chunk<Compressed> {
     let mut new_interior: Vec<InteriorNode> = Vec::new();
     let mut new_leaf: Vec<LeafNode> = Vec::new();
     let mut new_mat: PalettedVec<Material> = PalettedVec::new();
+    let mut canonical_interiors: Vec<InteriorNode> = Vec::new();
 
     // dedup_leaves builds canonical leaf nodes (for signature/material dedup) without adding to
     // new_leaf. emit_interior_node later copies canonical leaves into the parent's contiguous block.
@@ -45,6 +46,7 @@ pub fn compress(src: Chunk<Editing>) -> Chunk<Compressed> {
             &int_remap,
             &leaf_remap,
             &canonical_leaves,
+            &mut canonical_interiors,
             &mut new_interior,
             &mut new_leaf,
             &mut new_mat,
@@ -52,6 +54,11 @@ pub fn compress(src: Chunk<Editing>) -> Chunk<Compressed> {
         for (old, new) in pairs {
             int_remap[old as usize] = new;
         }
+    }
+
+    // Push the root canonical so it sits at new_interior.len() - 1 where the shader expects it.
+    if let Some(&root) = canonical_interiors.last() {
+        new_interior.push(root);
     }
 
     Chunk {
@@ -171,6 +178,7 @@ fn dedup_interior_at_depth(
     int_remap: &[u32],
     leaf_remap: &[u32],
     canonical_leaves: &[LeafNode],
+    canonical_interiors: &mut Vec<InteriorNode>,
     new_interior: &mut Vec<InteriorNode>,
     new_leaf: &mut Vec<LeafNode>,
     new_mat: &mut PalettedVec<Material>,
@@ -187,7 +195,7 @@ fn dedup_interior_at_depth(
         } else {
             let new_idx = emit_interior_node(
                 node, old_mat, int_remap, leaf_remap, canonical_leaves,
-                new_interior, new_leaf, new_mat,
+                canonical_interiors, new_interior, new_leaf, new_mat,
             );
             sig_to_new.insert(sig, new_idx);
             new_idx
@@ -208,6 +216,7 @@ fn emit_interior_node(
     int_remap: &[u32],
     leaf_remap: &[u32],
     canonical_leaves: &[LeafNode],
+    canonical_interiors: &mut Vec<InteriorNode>,
     new_interior: &mut Vec<InteriorNode>,
     new_leaf: &mut Vec<LeafNode>,
     new_mat: &mut PalettedVec<Material>,
@@ -236,7 +245,7 @@ fn emit_interior_node(
         match node.state(slot) {
             CellState::Interior => {
                 let remapped = int_remap[node.interior_child_index(slot) as usize];
-                let src = new_interior[remapped as usize];
+                let src = canonical_interiors[remapped as usize];
                 new_interior[(new_interior_ptr + int_rank) as usize] = src;
                 int_rank += 1;
             }
@@ -251,14 +260,14 @@ fn emit_interior_node(
         mask &= mask - 1;
     }
 
-    let new_idx = new_interior.len() as u32;
+    let new_idx = canonical_interiors.len() as u32;
     let mut out = InteriorNode::default();
     out.set_has_child(has_child);
     out.set_is_leaf(is_leaf);
     out.set_interior_offset(new_interior_ptr);
     out.set_leaf_offset(new_leaf_ptr);
     out.set_material_offset(new_mat_offset);
-    new_interior.push(out);
+    canonical_interiors.push(out);
 
     new_idx
 }

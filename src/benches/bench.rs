@@ -516,6 +516,22 @@ fn run_tests() {
         assert_chunk_valid(&chunk);
     }
 
+    // 17. Filling a 4³ leaf region with one material collapses to Filled on the parent.
+    {
+        let mut chunk = Chunk::<Editing>::new();
+        // Fill a 4³ leaf region (positions [0..4, 0..4, 0..4]) with blue.
+        for x in 0u8..4 {
+            for y in 0u8..4 {
+                for z in 0u8..4 {
+                    chunk.push_edit(Path::from_coords([x, y, z], 4), blue());
+                }
+            }
+        }
+        chunk.apply_edits();
+        // The leaf at [0,0,0] depth-3 should collapse to a Filled slot — no leaf nodes.
+        assert_eq!(chunk.leaf_nodes.len(), 0, "uniform 4³ region should collapse to Filled, not Leaf");
+    }
+
     println!("all tests passed");
 }
 

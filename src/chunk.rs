@@ -181,8 +181,18 @@ impl Chunk<Editing> {
             None
         };
 
-        if let Some(new_root) = self.rebuild_interior(old_root, expand_fill, 0, sub_batch) {
-            self.state.interior_nodes.push(new_root);
+        match self.rebuild_interior(old_root, expand_fill, 0, sub_batch) {
+            rebuild::RebuildResult::Empty => {}
+            rebuild::RebuildResult::Filled(mat) => {
+                self.state.interior_nodes.clear();
+                self.leaf_nodes.clear();
+                self.materials.clear();
+                self.materials.push(mat);
+            }
+            rebuild::RebuildResult::Interior(new_root) => {
+                self.state.interior_nodes.push(new_root);
+            }
+            rebuild::RebuildResult::Leaf(_) => unreachable!(),
         }
     }
 

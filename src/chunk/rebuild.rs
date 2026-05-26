@@ -4,15 +4,14 @@ use super::node::{CellState, InteriorNodeWide, LeafNode};
 use super::{Chunk, Editing};
 use crate::util::PalettedVec;
 
+pub(super) enum RebuildResult {
+    Empty,
+    Filled(Material),
+    Leaf(LeafNode),
+    Interior(InteriorNodeWide),
+}
+
 impl Chunk<Editing> {
-    /// Rebuilds an interior node at `tree_depth` (0 = root, 1, 2) against a sorted edit slice.
-    ///
-    /// Returns the rebuilt node by value, with its child blocks already appended to
-    /// `self.state.interior_nodes` and `self.leaf_nodes`. Returns `None` if the subtree
-    /// is entirely empty after applying edits.
-    ///
-    /// The caller is responsible for writing the returned node into its parent's child block
-    /// (or, for the root, pushing it onto `self.state.interior_nodes`).
     #[inline]
     pub(super) fn rebuild_interior(
         &mut self,
@@ -20,7 +19,7 @@ impl Chunk<Editing> {
         expand_fill: Option<Material>,
         tree_depth: u8,
         edits: &[(Path, Material)],
-    ) -> Option<InteriorNodeWide> {
+    ) -> RebuildResult {
         debug_assert!(tree_depth <= 2);
         debug_assert!(!(old_node.is_some() && expand_fill.is_some()));
 
@@ -111,30 +110,50 @@ impl Chunk<Editing> {
 
             if child_is_leaf {
                 let old_leaf = old_child_idx.map(|i| self.leaf_nodes[i as usize]);
-                if let Some(leaf_node) = self.rebuild_leaf(old_leaf, child_expand_fill, slot_edits)
-                {
-                    let lod = self.materials.get(leaf_node.material_offset());
-                    new_has_child |= 1u64 << slot;
-                    new_is_leaf |= 1u64 << slot;
-                    slot_lods[slot as usize] = lod;
-                    slot_leaf_nodes[slot as usize] = leaf_node;
+                match self.rebuild_leaf(old_leaf, child_expand_fill, slot_edits) {
+                    RebuildResult::Empty => {}
+                    RebuildResult::Filled(mat) => {
+                        new_is_leaf |= 1u64 << slot;
+                        slot_lods[slot as usize] = mat;
+                    }
+                    RebuildResult::Leaf(leaf_node) => {
+                        let lod = self.materials.get(leaf_node.material_offset());
+                        new_has_child |= 1u64 << slot;
+                        new_is_leaf |= 1u64 << slot;
+                        slot_lods[slot as usize] = lod;
+                        slot_leaf_nodes[slot as usize] = leaf_node;
+                    }
+                    RebuildResult::Interior(_) => unreachable!(),
                 }
             } else {
                 let old_interior = old_child_idx.map(|i| self.state.interior_nodes[i as usize]);
-                if let Some(interior_node) =
-                    self.rebuild_interior(old_interior, child_expand_fill, tree_depth + 1, slot_edits)
-                {
-                    let lod = self.materials.get(interior_node.material_offset());
-                    new_has_child |= 1u64 << slot;
-                    slot_lods[slot as usize] = lod;
-                    slot_interior_nodes[slot as usize] = interior_node;
+                match self.rebuild_interior(old_interior, child_expand_fill, tree_depth + 1, slot_edits) {
+                    RebuildResult::Empty => {}
+                    RebuildResult::Filled(mat) => {
+                        new_is_leaf |= 1u64 << slot;
+                        slot_lods[slot as usize] = mat;
+                    }
+                    RebuildResult::Interior(interior_node) => {
+                        let lod = self.materials.get(interior_node.material_offset());
+                        new_has_child |= 1u64 << slot;
+                        slot_lods[slot as usize] = lod;
+                        slot_interior_nodes[slot as usize] = interior_node;
+                    }
+                    RebuildResult::Leaf(_) => unreachable!(),
                 }
             }
         }
 
         let occupancy = new_has_child | new_is_leaf;
         if occupancy == 0 {
-            return None;
+            return RebuildResult::Empty;
+        }
+
+        if new_has_child == 0 && new_is_leaf == !0u64 {
+            let first = slot_lods[0];
+            if slot_lods.iter().all(|&m| m == first) {
+                return RebuildResult::Filled(first);
+            }
         }
 
         let n_interior_children = (new_has_child & !new_is_leaf).count_ones() as usize;
@@ -182,20 +201,16 @@ impl Chunk<Editing> {
         new_node.set_leaf_offset(new_leaf_ptr);
         new_node.set_material_offset(new_mat_offset);
 
-        Some(new_node)
+        RebuildResult::Interior(new_node)
     }
 
-    /// Rebuilds a leaf node against a sorted edit slice (all edits must be at path depth 4).
-    ///
-    /// Returns the rebuilt node by value, with its materials already pushed to `self.materials`.
-    /// Returns `None` if the leaf is entirely empty after edits.
     #[inline]
     pub(super) fn rebuild_leaf(
         &mut self,
         old_node: Option<LeafNode>,
         expand_fill: Option<Material>,
         edits: &[(Path, Material)],
-    ) -> Option<LeafNode> {
+    ) -> RebuildResult {
         debug_assert!(!(old_node.is_some() && expand_fill.is_some()));
 
         let old = old_node.unwrap_or_default();
@@ -242,7 +257,14 @@ impl Chunk<Editing> {
         }
 
         if new_occupancy == 0 {
-            return None;
+            return RebuildResult::Empty;
+        }
+
+        if new_occupancy == !0u64 {
+            let first = slot_materials[0];
+            if slot_materials.iter().all(|&m| m == first) {
+                return RebuildResult::Filled(first);
+            }
         }
 
         let new_mat_offset = self.materials.len();
@@ -257,7 +279,7 @@ impl Chunk<Editing> {
         new_node.set_occupancy(new_occupancy);
         new_node.set_material_offset(new_mat_offset);
 
-        Some(new_node)
+        RebuildResult::Leaf(new_node)
     }
 }
 
