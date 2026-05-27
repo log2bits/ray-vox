@@ -3,11 +3,12 @@ use std::time::Instant;
 use ray_vox::{
 	chunk::{
 		Chunk,
-		edit::{Edits, Path},
+		edit::{ChunkEdits, Path},
 		material::Material,
 		node::{CellState, InteriorNode, LeafNode},
 	},
-	volumes::Sphere,
+	generate::volume::sphere::Sphere,
+	world::WorldPosition,
 };
 
 const DEPTH: usize = 4;
@@ -29,9 +30,17 @@ fn red() -> Material {
 	Material::from_rgb_pbr_id([200, 80, 80], 0)
 }
 
-fn sphere_edits(radius: f32, material: Material) -> Edits {
+fn sphere_edits(radius: f32, material: Material) -> ChunkEdits {
+	use ray_vox::generate::LazyEdit;
+	use ray_vox::world::clipmap::{ChunkHandle, Clipmap};
 	let center = aligned_center(radius);
-	Sphere { center, radius, material }.build_edits([0, 0, 0], 1)
+	let clipmap = Clipmap {
+		occupancy: [[0u32; 16]; 11],
+		origin: WorldPosition::from([0; 3]),
+		pending_remap: Vec::new(),
+		pending_origin: WorldPosition::from([0; 3]),
+	};
+	Sphere { center, radius, material }.generate(ChunkHandle::new(10, 4, 4, 4), &clipmap)
 }
 
 fn get_voxel(chunk: &Chunk, pos: [u8; 3]) -> Option<Material> {
@@ -193,7 +202,7 @@ fn print_chunk_stats(label: &str, chunk: &Chunk) {
 	);
 }
 
-fn print_edit_depths(label: &str, edits: &Edits) {
+fn print_edit_depths(label: &str, edits: &ChunkEdits) {
 	let mut counts = [0u32; DEPTH + 1];
 	for (path, _) in &edits.edits {
 		let d = path.depth() as usize;
@@ -213,14 +222,14 @@ fn print_edit_depths(label: &str, edits: &Edits) {
 fn run_tests() {
 	// 1. Empty chunk stays empty after no-op stamp.
 	{
-		let chunk = Chunk::new().apply_edits(Edits::new());
+		let chunk = Chunk::new().apply_edits(ChunkEdits::new(WorldPosition::from([0; 3])));
 		assert!(chunk.is_empty());
 		assert_eq!(chunk.materials.lut.len(), 0);
 	}
 
 	// 2. Single voxel edit adds exactly one material entry.
 	{
-		let mut edits = Edits::new();
+		let mut edits = ChunkEdits::new(WorldPosition::from([0; 3]));
 		edits.push(Path::from_coords([0, 0, 0], 4), blue());
 		let chunk = Chunk::new().apply_edits(edits);
 		assert!(!chunk.is_empty());
@@ -263,7 +272,7 @@ fn run_tests() {
 
 	// 7. Delete a single voxel from an otherwise solid chunk.
 	{
-		let mut edits = Edits::new();
+		let mut edits = ChunkEdits::new(WorldPosition::from([0; 3]));
 		edits.push(Path::from_coords([0, 0, 0], 4), Material::air());
 		let chunk = Chunk::new()
 			.apply_edits(sphere_edits(512.0, blue()))
@@ -286,7 +295,7 @@ fn run_tests() {
 	// 9. get_voxel returns the correct material after a voxel edit.
 	{
 		let v = blue();
-		let mut edits = Edits::new();
+		let mut edits = ChunkEdits::new(WorldPosition::from([0; 3]));
 		edits.push(Path::from_coords([10, 20, 30], 4), v);
 		let chunk = Chunk::new().apply_edits(edits);
 		assert_eq!(get_voxel(&chunk, [10, 20, 30]), Some(v));
@@ -295,7 +304,7 @@ fn run_tests() {
 
 	// 10. Root-level fill produces a uniform chunk (no tree nodes).
 	{
-		let mut edits = Edits::new();
+		let mut edits = ChunkEdits::new(WorldPosition::from([0; 3]));
 		edits.push(Path::from(0u32), blue()); // root fill
 		let chunk = Chunk::new().apply_edits(edits);
 		assert!(chunk.is_uniform());
@@ -304,7 +313,7 @@ fn run_tests() {
 
 	// 11. Root-level air over filled chunk empties it.
 	{
-		let mut air_edits = Edits::new();
+		let mut air_edits = ChunkEdits::new(WorldPosition::from([0; 3]));
 		air_edits.push(Path::from(0u32), Material::air()); // root air fill
 		let chunk = Chunk::new()
 			.apply_edits(sphere_edits(100.0, blue()))
@@ -314,9 +323,9 @@ fn run_tests() {
 
 	// 12. Sub-voxel edit after root fill expands the tree.
 	{
-		let mut fill_edits = Edits::new();
+		let mut fill_edits = ChunkEdits::new(WorldPosition::from([0; 3]));
 		fill_edits.push(Path::from(0u32), blue());
-		let mut sub_edits = Edits::new();
+		let mut sub_edits = ChunkEdits::new(WorldPosition::from([0; 3]));
 		sub_edits.push(Path::from_coords([0, 0, 0], 4), red());
 		let chunk = Chunk::new()
 			.apply_edits(fill_edits)
@@ -327,7 +336,7 @@ fn run_tests() {
 
 	// 13. A single voxel produces expected tree depth (≥3 interior nodes).
 	{
-		let mut edits = Edits::new();
+		let mut edits = ChunkEdits::new(WorldPosition::from([0; 3]));
 		edits.push(Path::from_coords([0, 0, 0], 4), blue());
 		let chunk = Chunk::new().apply_edits(edits);
 		assert!(
@@ -366,7 +375,7 @@ fn run_tests() {
 
 	// 16. Two materials are both retrievable via get_voxel.
 	{
-		let mut edits = Edits::new();
+		let mut edits = ChunkEdits::new(WorldPosition::from([0; 3]));
 		edits.push(Path::from_coords([0, 0, 0], 4), blue());
 		edits.push(Path::from_coords([255, 255, 255], 4), red());
 		let chunk = Chunk::new().apply_edits(edits);
@@ -382,7 +391,7 @@ fn run_tests() {
 	// so the compressed chunk may have exactly one leaf node.  What must NOT happen
 	// is the chunk being treated as empty or producing an invalid tree.
 	{
-		let mut edits = Edits::new();
+		let mut edits = ChunkEdits::new(WorldPosition::from([0; 3]));
 		// Fill a 4³ leaf region (positions [0..4, 0..4, 0..4]) with blue.
 		for x in 0u8..4 {
 			for y in 0u8..4 {
@@ -456,7 +465,7 @@ fn terrain_height(x: u8, z: u8) -> u8 {
 }
 
 fn make_minecraft_chunk() -> Chunk {
-	let mut edits = Edits::new();
+	let mut edits = ChunkEdits::new(WorldPosition::from([0; 3]));
 	for bx in 0u8..16 {
 		for bz in 0u8..16 {
 			let surface = terrain_height(bx, bz); // block-space y, 0..15
@@ -474,7 +483,7 @@ fn make_minecraft_chunk() -> Chunk {
 }
 
 fn make_flat_minecraft_chunk() -> Chunk {
-	let mut edits = Edits::new();
+	let mut edits = ChunkEdits::new(WorldPosition::from([0; 3]));
 	for bx in 0u8..16 {
 		for bz in 0u8..16 {
 			for by in 0u8..8 {
@@ -503,8 +512,16 @@ fn make_grid_spheres() -> Chunk {
 	chunk
 }
 
-fn sphere_edits_center(radius: f32, center: [f32; 3], material: Material) -> Edits {
-	Sphere { center, radius, material }.build_edits([0, 0, 0], 1)
+fn sphere_edits_center(radius: f32, center: [f32; 3], material: Material) -> ChunkEdits {
+	use ray_vox::generate::LazyEdit;
+	use ray_vox::world::clipmap::{ChunkHandle, Clipmap};
+	let clipmap = Clipmap {
+		occupancy: [[0u32; 16]; 11],
+		origin: WorldPosition::from([0; 3]),
+		pending_remap: Vec::new(),
+		pending_origin: WorldPosition::from([0; 3]),
+	};
+	Sphere { center, radius, material }.generate(ChunkHandle::new(10, 4, 4, 4), &clipmap)
 }
 
 fn main() {

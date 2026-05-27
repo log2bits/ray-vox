@@ -1,11 +1,11 @@
 use std::array::from_fn;
-
+use crate::world::WorldPosition;
 
 pub struct Clipmap {
 	pub occupancy: [[u32; 16]; 11],
-	pub origin: [i32; 3],
+	pub origin: WorldPosition,
 	pub pending_remap: Vec<RemapOp>,
-	pub pending_origin: [i32; 3],
+	pub pending_origin: WorldPosition,
 }
 
 pub enum RemapOp {
@@ -17,18 +17,20 @@ pub enum RemapOp {
 }
 
 impl Clipmap {
-	pub fn level_origin(&self, depth: u8) -> [i32; 3] {
+	pub fn level_origin(&self, depth: u8) -> WorldPosition {
 		if depth == 0 {
-			return [-(1i32 << 30); 3];
+			return WorldPosition { position: [-(1i32 << 30); 3] };
 		}
 		let cs = chunk_size_at_depth(depth);
-		from_fn(|i| {
-			let snapped = (self.origin[i] + (cs >> 1)) & !(cs - 1);
-			snapped - (cs << 2)
-		})
+		WorldPosition {
+			position: from_fn(|i| {
+				let snapped = (self.origin.position[i] + (cs >> 1)) & !(cs - 1);
+				snapped - (cs << 2)
+			}),
+		}
 	}
 
-	pub fn set_origin(&mut self, new_origin: [i32; 3]) {
+	pub fn set_origin(&mut self, new_origin: WorldPosition) {
 		let new_level_origin_10 = {
 			let saved = self.origin;
 			self.origin = new_origin;
@@ -41,8 +43,8 @@ impl Clipmap {
 			return;
 		}
 
-		let old_origins: [[i32; 3]; 11] = from_fn(|d| self.level_origin(d as u8));
-		let new_origins: [[i32; 3]; 11] = {
+		let old_origins: [WorldPosition; 11] = from_fn(|d| self.level_origin(d as u8));
+		let new_origins: [WorldPosition; 11] = {
 			let saved = self.origin;
 			self.origin = new_origin;
 			let r = from_fn(|d| self.level_origin(d as u8));
@@ -66,15 +68,15 @@ impl Clipmap {
 				}
 
 				let world = [
-					old_level_origin[0] as i64 + old_x as i64 * chunk_size,
-					old_level_origin[1] as i64 + old_y as i64 * chunk_size,
-					old_level_origin[2] as i64 + old_z as i64 * chunk_size,
+					old_level_origin.position[0] as i64 + old_x as i64 * chunk_size,
+					old_level_origin.position[1] as i64 + old_y as i64 * chunk_size,
+					old_level_origin.position[2] as i64 + old_z as i64 * chunk_size,
 				];
 
 				let new_slot = [
-					((world[0] - new_level_origin[0] as i64) / chunk_size) as i32,
-					((world[1] - new_level_origin[1] as i64) / chunk_size) as i32,
-					((world[2] - new_level_origin[2] as i64) / chunk_size) as i32,
+					((world[0] - new_level_origin.position[0] as i64) / chunk_size) as i32,
+					((world[1] - new_level_origin.position[1] as i64) / chunk_size) as i32,
+					((world[2] - new_level_origin.position[2] as i64) / chunk_size) as i32,
 				];
 
 				if slot_in_bounds(new_slot) {
@@ -107,15 +109,15 @@ impl Clipmap {
 				let new_handle = ChunkHandle::new(depth, new_x, new_y, new_z);
 
 				let world = [
-					new_level_origin[0] as i64 + new_x as i64 * chunk_size,
-					new_level_origin[1] as i64 + new_y as i64 * chunk_size,
-					new_level_origin[2] as i64 + new_z as i64 * chunk_size,
+					new_level_origin.position[0] as i64 + new_x as i64 * chunk_size,
+					new_level_origin.position[1] as i64 + new_y as i64 * chunk_size,
+					new_level_origin.position[2] as i64 + new_z as i64 * chunk_size,
 				];
 
 				let old_slot = [
-					((world[0] - old_level_origin[0] as i64) / chunk_size) as i32,
-					((world[1] - old_level_origin[1] as i64) / chunk_size) as i32,
-					((world[2] - old_level_origin[2] as i64) / chunk_size) as i32,
+					((world[0] - old_level_origin.position[0] as i64) / chunk_size) as i32,
+					((world[1] - old_level_origin.position[1] as i64) / chunk_size) as i32,
+					((world[2] - old_level_origin.position[2] as i64) / chunk_size) as i32,
 				];
 
 				if slot_in_bounds(old_slot) {
@@ -229,7 +231,7 @@ fn active_slots() -> impl Iterator<Item = [u8; 3]> {
 fn fine_handles_covering(
 	coarse_world: [i64; 3],
 	fine_depth: u8,
-	fine_level_origin: [i32; 3],
+	fine_level_origin: WorldPosition,
 ) -> [ChunkHandle; 64] {
 	let fine_chunk_size = chunk_size_at_depth(fine_depth) as i64;
 	from_fn(|i| {
@@ -240,9 +242,9 @@ fn fine_handles_covering(
 			coarse_world[2] + offset[2] as i64 * fine_chunk_size,
 		];
 		let slot = [
-			((fine_world[0] - fine_level_origin[0] as i64) / fine_chunk_size) as u8,
-			((fine_world[1] - fine_level_origin[1] as i64) / fine_chunk_size) as u8,
-			((fine_world[2] - fine_level_origin[2] as i64) / fine_chunk_size) as u8,
+			((fine_world[0] - fine_level_origin.position[0] as i64) / fine_chunk_size) as u8,
+			((fine_world[1] - fine_level_origin.position[1] as i64) / fine_chunk_size) as u8,
+			((fine_world[2] - fine_level_origin.position[2] as i64) / fine_chunk_size) as u8,
 		];
 		ChunkHandle::new(fine_depth, slot[0], slot[1], slot[2])
 	})

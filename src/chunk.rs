@@ -7,7 +7,7 @@ pub mod stats;
 
 use crate::util::PalettedVec;
 use bytemuck;
-use edit::Edits;
+use edit::ChunkEdits;
 use edit::Path;
 use material::Material;
 use node::{InteriorNode, InteriorNodeWide, LeafNode};
@@ -36,15 +36,11 @@ impl Chunk {
 	}
 
 	pub fn is_uniform(&self) -> bool {
-		self.interior_nodes.is_empty()
-			&& self.leaf_nodes.is_empty()
-			&& self.materials.len() == 1
+		self.interior_nodes.is_empty() && self.leaf_nodes.is_empty() && self.materials.len() == 1
 	}
 
 	pub fn is_empty(&self) -> bool {
-		self.interior_nodes.is_empty()
-			&& self.leaf_nodes.is_empty()
-			&& self.materials.is_empty()
+		self.interior_nodes.is_empty() && self.leaf_nodes.is_empty() && self.materials.is_empty()
 	}
 
 	pub fn gpu_size_bytes(&self) -> u32 {
@@ -64,7 +60,7 @@ impl Chunk {
 	///
 	/// Internally: decompresses → applies edits → compresses.
 	/// Compression happens once at the end, not after each individual edit.
-	pub fn apply_edits(self, edits: Edits) -> Chunk {
+	pub fn apply_edits(self, edits: ChunkEdits) -> Chunk {
 		let mut editing = self.into_editing();
 		editing.edits = edits;
 		editing.flush_edits();
@@ -89,7 +85,7 @@ impl Chunk {
 			leaf_nodes: self.leaf_nodes,
 			materials: self.materials,
 			interior_nodes: wide,
-			edits: Edits::new(),
+			edits: ChunkEdits::default(),
 		}
 	}
 }
@@ -114,7 +110,7 @@ pub(crate) struct MutableChunk {
 	pub(crate) leaf_nodes: Vec<LeafNode>,
 	pub(crate) materials: PalettedVec<Material>,
 	pub(crate) interior_nodes: Vec<InteriorNodeWide>,
-	pub(crate) edits: Edits,
+	pub(crate) edits: ChunkEdits,
 }
 
 impl MutableChunk {
@@ -122,7 +118,7 @@ impl MutableChunk {
 	pub(crate) fn flush_edits(&mut self) {
 		let mut edits = std::mem::take(&mut self.edits);
 		edits.sort();
-		for batch in &edits.batches {
+		for batch in &edits.ranges {
 			let start = batch.range.start as usize;
 			let end = batch.range.end as usize;
 			let slice = &edits.edits[start..end];
