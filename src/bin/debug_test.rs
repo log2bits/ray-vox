@@ -1,6 +1,8 @@
 use ray_vox::{
-	chunk::{Chunk, material::Material, node::CellState},
-	volumes::{self, Sphere},
+	Chunk,
+	chunk::{material::Material, node::CellState},
+	volumes::{Sphere, Volume},
+	world::clipmap::{ChunkHandle, Clipmap},
 };
 
 fn blue() -> Material {
@@ -39,41 +41,23 @@ fn validate(chunk: &Chunk, label: &str) {
 }
 
 fn main() {
-	use ray_vox::chunk::edit::Edits;
+	// At depth 10 with origin [0,0,0], the chunk at slot (4,4,4) has
+	// world origin [0,0,0] and voxel_size=1.
+	let clipmap = Clipmap {
+		occupancy: [[0u32; 16]; 11],
+		origin: [0i32; 3],
+		pending_remap: Vec::new(),
+		pending_origin: [0i32; 3],
+	};
+	let handle = ChunkHandle::new(10, 4, 4, 4);
 
-	// Build c1: sphere stamp
-	let mut edits1 = Edits::new();
-	volumes::stamp(
-		&Sphere {
-			center: [128.0; 3],
-			radius: 32.0,
-			material: blue(),
-		},
-		&mut edits1,
-	);
-	let c1 = Chunk::new().apply_edits(edits1);
-	validate(&c1, "c1-after-apply_edits");
-	println!(
-		"c1 done: interior={} leaf={}",
-		c1.interior_nodes.len(),
-		c1.leaf_nodes.len()
-	);
+	let sphere = Sphere { center: [128.0; 3], radius: 32.0, material: blue() };
 
-	// Build c2: same stamp again on top of c1
-	let mut edits2 = Edits::new();
-	volumes::stamp(
-		&Sphere {
-			center: [128.0; 3],
-			radius: 32.0,
-			material: blue(),
-		},
-		&mut edits2,
-	);
-	let c2 = c1.clone().apply_edits(edits2);
-	validate(&c2, "c2-after-compress");
-	println!(
-		"c2 done: interior={} leaf={}",
-		c2.interior_nodes.len(),
-		c2.leaf_nodes.len()
-	);
+	let c1 = sphere.apply(Chunk::new(), handle, &clipmap);
+	validate(&c1, "c1-after-apply");
+	println!("c1 done: interior={} leaf={}", c1.interior_nodes.len(), c1.leaf_nodes.len());
+
+	let c2 = sphere.apply(c1.clone(), handle, &clipmap);
+	validate(&c2, "c2-after-apply");
+	println!("c2 done: interior={} leaf={}", c2.interior_nodes.len(), c2.leaf_nodes.len());
 }

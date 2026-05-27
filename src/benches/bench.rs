@@ -7,7 +7,7 @@ use ray_vox::{
 		material::Material,
 		node::{CellState, InteriorNode, LeafNode},
 	},
-	volumes::{self, Sphere},
+	volumes::Sphere,
 };
 
 const DEPTH: usize = 4;
@@ -30,17 +30,8 @@ fn red() -> Material {
 }
 
 fn sphere_edits(radius: f32, material: Material) -> Edits {
-	let mut edits = Edits::new();
 	let center = aligned_center(radius);
-	volumes::stamp(
-		&Sphere {
-			center,
-			radius,
-			material,
-		},
-		&mut edits,
-	);
-	edits
+	Sphere { center, radius, material }.build_edits([0, 0, 0], 1)
 }
 
 fn get_voxel(chunk: &Chunk, pos: [u8; 3]) -> Option<Material> {
@@ -513,16 +504,7 @@ fn make_grid_spheres() -> Chunk {
 }
 
 fn sphere_edits_center(radius: f32, center: [f32; 3], material: Material) -> Edits {
-	let mut edits = Edits::new();
-	volumes::stamp(
-		&Sphere {
-			center,
-			radius,
-			material,
-		},
-		&mut edits,
-	);
-	edits
+	Sphere { center, radius, material }.build_edits([0, 0, 0], 1)
 }
 
 fn main() {

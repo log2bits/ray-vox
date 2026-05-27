@@ -1,5 +1,10 @@
+use std::array::from_fn;
+
+use crate::Chunk;
+use crate::chunk::edit::Edits;
 use crate::chunk::material::Material;
-use crate::volumes::{Containment, Volume};
+use crate::volumes::{Overlap, Shape, Volume, chunk_world_origin, stamp, voxel_size};
+use crate::world::clipmap::{ChunkHandle, Clipmap, chunk_size_at_depth};
 
 pub struct Rect {
 	pub min: [i32; 3],
@@ -7,30 +12,39 @@ pub struct Rect {
 	pub material: Material,
 }
 
-impl Volume for Rect {
+impl Shape for Rect {
+	fn overlap(&self, world_min: [i32; 3], world_max: [i32; 3]) -> Overlap {
+		for i in 0..3 {
+			if self.max[i] <= world_min[i] || self.min[i] >= world_max[i] {
+				return Overlap::Empty;
+			}
+		}
+		for i in 0..3 {
+			if self.min[i] > world_min[i] || self.max[i] < world_max[i] {
+				return Overlap::Partial;
+			}
+		}
+		Overlap::Full
+	}
+
 	fn material(&self) -> Material {
 		self.material
 	}
+}
 
-	fn containment(&self, min: [i32; 3], max: [i32; 3]) -> Containment {
-		if self.max[0] <= min[0]
-			|| self.min[0] >= max[0]
-			|| self.max[1] <= min[1]
-			|| self.min[1] >= max[1]
-			|| self.max[2] <= min[2]
-			|| self.min[2] >= max[2]
-		{
-			return Containment::Empty;
-		}
-		if self.min[0] <= min[0]
-			&& self.max[0] >= max[0]
-			&& self.min[1] <= min[1]
-			&& self.max[1] >= max[1]
-			&& self.min[2] <= min[2]
-			&& self.max[2] >= max[2]
-		{
-			return Containment::Full;
-		}
-		Containment::Partial
+impl Volume for Rect {
+	fn overlaps(&self, handle: ChunkHandle, clipmap: &Clipmap) -> bool {
+		let world_origin = chunk_world_origin(handle, clipmap);
+		let cs = chunk_size_at_depth(handle.depth());
+		let world_max: [i32; 3] = from_fn(|i| world_origin[i] + cs);
+		!matches!(self.overlap(world_origin, world_max), Overlap::Empty)
+	}
+
+	fn apply(&self, chunk: Chunk, handle: ChunkHandle, clipmap: &Clipmap) -> Chunk {
+		let world_origin = chunk_world_origin(handle, clipmap);
+		let vs = voxel_size(handle.depth());
+		let mut edits = Edits::new();
+		stamp(self, &mut edits, world_origin, vs);
+		chunk.apply_edits(edits)
 	}
 }

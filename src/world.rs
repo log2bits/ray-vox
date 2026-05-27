@@ -6,12 +6,12 @@ use crate::util::Lut;
 use chunk_pool::ChunkPool;
 pub use pbr::Pbr;
 
-use crate::chunk::Chunk;
+use crate::volumes::Volume;
 use clipmap::Clipmap;
 
 pub struct World {
+	pub volumes: Vec<Box<dyn Volume>>,
 	pub chunk_pool: ChunkPool,
-	pub persistent_chunks: Vec<Chunk>,
 	pub clipmap: Clipmap,
 	pub pbr_lut: Lut<Pbr>,
 }
