@@ -1,15 +1,15 @@
 use crate::chunk::Chunk;
-use crate::util::types::ClipmapChunkId;
+use crate::util::types::ChunkId;
 use std::collections::{HashMap, HashSet};
 
 pub struct ChunkPool {
 	// CPU side
-	pub chunks: HashMap<ClipmapChunkId, Chunk>,
+	pub chunks: HashMap<ChunkId, Chunk>,
 
 	// GPU allocation tracking
-	pub allocations: HashMap<ClipmapChunkId, Allocation>,
+	pub allocations: HashMap<ChunkId, Allocation>,
 	pub free_list: Vec<Allocation>,
-	pub dirty: HashSet<ClipmapChunkId>,
+	pub dirty: HashSet<ChunkId>,
 	// TODO: gpu_buffer: wgpu::Buffer,
 	// TODO: staging_belt: wgpu::util::StagingBelt,
 }
@@ -30,14 +30,14 @@ impl ChunkPool {
 		}
 	}
 
-	pub fn insert(&mut self, handle: ClipmapChunkId, chunk: Chunk) {
+	pub fn insert(&mut self, handle: ChunkId, chunk: Chunk) {
 		let alloc = self.alloc(chunk.gpu_size_bytes());
 		self.allocations.insert(handle, alloc);
 		self.chunks.insert(handle, chunk);
 		self.dirty.insert(handle);
 	}
 
-	pub fn remove(&mut self, handle: ClipmapChunkId) -> Option<Chunk> {
+	pub fn remove(&mut self, handle: ChunkId) -> Option<Chunk> {
 		if let Some(alloc) = self.allocations.remove(&handle) {
 			self.free_list.push(alloc);
 			self.coalesce();
@@ -46,17 +46,17 @@ impl ChunkPool {
 		self.chunks.remove(&handle)
 	}
 
-	pub fn get(&self, handle: ClipmapChunkId) -> Option<&Chunk> {
+	pub fn get(&self, handle: ChunkId) -> Option<&Chunk> {
 		self.chunks.get(&handle)
 	}
 
 	/// Mutable access marks the chunk dirty for re-upload.
-	pub fn get_mut(&mut self, handle: ClipmapChunkId) -> Option<&mut Chunk> {
+	pub fn get_mut(&mut self, handle: ChunkId) -> Option<&mut Chunk> {
 		self.dirty.insert(handle);
 		self.chunks.get_mut(&handle)
 	}
 
-	pub fn contains(&self, handle: ClipmapChunkId) -> bool {
+	pub fn contains(&self, handle: ChunkId) -> bool {
 		self.chunks.contains_key(&handle)
 	}
 
