@@ -1,5 +1,5 @@
 use crate::chunk::Material;
-use crate::world::WorldPosition;
+use crate::util::types::WorldPos;
 use radsort::sort_by_key;
 use std::ops::Range;
 
@@ -7,7 +7,7 @@ const SORTED_RUN_THRESHOLD: u32 = 64;
 
 #[derive(Default, Clone)]
 pub struct ChunkEdits {
-	pub world_pos: WorldPosition,
+	pub world_pos: WorldPos,
 	pub edits: Vec<(Path, Material)>,
 	pub ranges: Vec<SortableRange>,
 	last_path: Path,
@@ -22,7 +22,7 @@ pub struct SortableRange {
 }
 
 impl ChunkEdits {
-	pub fn new(world_pos: WorldPosition) -> Self {
+	pub fn new(world_pos: WorldPos) -> Self {
 		Self {
 			world_pos,
 			edits: Vec::new(),
@@ -96,9 +96,9 @@ impl ChunkEdits {
 	}
 }
 
-impl Default for WorldPosition {
+impl Default for WorldPos {
 	fn default() -> Self {
-		WorldPosition::from([0; 3])
+		WorldPos::from([0; 3])
 	}
 }
 

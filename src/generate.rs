@@ -4,33 +4,33 @@ pub mod volume;
 
 use crate::chunk::edit::{ChunkEdits, Path};
 use crate::chunk::material::Material;
-use crate::world::WorldPosition;
-use crate::world::clipmap::{ChunkHandle, Clipmap, chunk_size_at_depth};
+use crate::util::types::{ClipmapChunkId, WorldPos};
+use crate::world::clipmap::{Clipmap, chunk_size_at_depth};
 use std::array::from_fn;
 
 /// Lazy edits span the world but are evaluated one chunk at a time on demand.
 /// Terrain, volumes, and other procedural content implement this.
 pub trait LazyEdit: Send + Sync {
-	fn generate(&self, handle: ChunkHandle, clipmap: &Clipmap) -> ChunkEdits;
+	fn generate(&self, handle: ClipmapChunkId) -> ChunkEdits;
 }
 
 /// Eager edits are evaluated once upfront and produce edits for every chunk they cover.
 /// The world applies these to persistent chunks immediately and discards the generator.
 pub trait EagerEdit: Send + Sync {
-	fn generate(&self, clipmap: &Clipmap) -> Vec<ChunkEdits>;
+	fn generate(&self) -> Vec<ChunkEdits>;
 }
 
-pub enum Overlap {
+pub enum CellState {
 	Empty,
-	Partial,
-	Full,
+	Uniform(Material),
+	Subdivide,
 }
 
-pub fn chunk_world_origin(handle: ChunkHandle, clipmap: &Clipmap) -> WorldPosition {
+pub fn chunk_world_origin(handle: ClipmapChunkId, clipmap: &Clipmap) -> WorldPos {
 	let level_origin = clipmap.level_origin(handle.depth());
 	let cs = chunk_size_at_depth(handle.depth());
-	WorldPosition {
-		position: from_fn(|i| level_origin.position[i] + handle.xyz()[i] as i32 * cs),
+	WorldPos {
+		pos: from_fn(|i| level_origin.pos[i] + handle.xyz()[i] as i32 * cs),
 	}
 }
 
@@ -46,12 +46,12 @@ pub fn voxel_size(depth: u8) -> i32 {
 /// and subdivision must continue. At depth 4 (single voxel), `material` must
 /// return `Some`.
 pub trait Volume: Send + Sync {
-	fn overlap(&self, world_min: WorldPosition, world_max: WorldPosition) -> Overlap;
-	fn material(&self, world_min: WorldPosition, world_max: WorldPosition) -> Option<Material>;
+	fn overlap(&self, world_min: WorldPos, world_max: WorldPos) -> Overlap;
+	fn material(&self, world_min: WorldPos, world_max: WorldPos) -> Option<Material>;
 }
 
 impl<T: Volume> LazyEdit for T {
-	fn generate(&self, handle: ChunkHandle, clipmap: &Clipmap) -> ChunkEdits {
+	fn generate(&self, handle: ClipmapChunkId, clipmap: &Clipmap) -> ChunkEdits {
 		let world_origin = chunk_world_origin(handle, clipmap);
 		let vs = voxel_size(handle.depth());
 		let mut edits = ChunkEdits::new(world_origin);
@@ -63,7 +63,7 @@ impl<T: Volume> LazyEdit for T {
 pub(crate) fn stamp_volume(
 	volume: &impl Volume,
 	edits: &mut ChunkEdits,
-	world_origin: WorldPosition,
+	world_origin: WorldPos,
 	voxel_size: i32,
 ) {
 	stamp_cell(volume, edits, world_origin, voxel_size, [0, 0, 0], 0);
@@ -72,17 +72,17 @@ pub(crate) fn stamp_volume(
 fn stamp_cell(
 	volume: &impl Volume,
 	edits: &mut ChunkEdits,
-	world_origin: WorldPosition,
+	world_origin: WorldPos,
 	voxel_size: i32,
 	local: [i32; 3],
 	depth: u8,
 ) {
 	let size = 256i32 >> (depth * 2);
-	let world_min = WorldPosition {
-		position: from_fn(|i| world_origin.position[i] + local[i] * voxel_size),
+	let world_min = WorldPos {
+		pos: from_fn(|i| world_origin.pos[i] + local[i] * voxel_size),
 	};
-	let world_max = WorldPosition {
-		position: from_fn(|i| world_min.position[i] + size * voxel_size),
+	let world_max = WorldPos {
+		pos: from_fn(|i| world_min.pos[i] + size * voxel_size),
 	};
 
 	match volume.overlap(world_min, world_max) {
@@ -117,7 +117,7 @@ fn stamp_cell(
 fn subdivide(
 	volume: &impl Volume,
 	edits: &mut ChunkEdits,
-	world_origin: WorldPosition,
+	world_origin: WorldPos,
 	voxel_size: i32,
 	local: [i32; 3],
 	depth: u8,

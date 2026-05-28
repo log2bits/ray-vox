@@ -2,7 +2,10 @@ use ray_vox::{
 	Chunk,
 	chunk::{material::Material, node::CellState},
 	generate::{LazyEdit, volume::sphere::Sphere},
-	world::{WorldPosition, clipmap::{ChunkHandle, Clipmap}},
+	world::{
+		WorldPos,
+		clipmap::{Clipmap, ClipmapChunkId},
+	},
 };
 
 fn blue() -> Material {
@@ -45,19 +48,31 @@ fn main() {
 	// world origin [0,0,0] and voxel_size=1.
 	let clipmap = Clipmap {
 		occupancy: [[0u32; 16]; 11],
-		origin: WorldPosition::from([0; 3]),
+		origin: WorldPos::from([0; 3]),
 		pending_remap: Vec::new(),
-		pending_origin: WorldPosition::from([0; 3]),
+		pending_origin: WorldPos::from([0; 3]),
 	};
-	let handle = ChunkHandle::new(10, 4, 4, 4);
+	let handle = ClipmapChunkId::new(10, 4, 4, 4);
 
-	let sphere = Sphere { center: [128.0; 3], radius: 32.0, material: blue() };
+	let sphere = Sphere {
+		center: [128.0; 3],
+		radius: 32.0,
+		material: blue(),
+	};
 
 	let c1 = Chunk::new().apply_edits(sphere.generate(handle, &clipmap));
 	validate(&c1, "c1-after-apply");
-	println!("c1 done: interior={} leaf={}", c1.interior_nodes.len(), c1.leaf_nodes.len());
+	println!(
+		"c1 done: interior={} leaf={}",
+		c1.interior_nodes.len(),
+		c1.leaf_nodes.len()
+	);
 
 	let c2 = c1.clone().apply_edits(sphere.generate(handle, &clipmap));
 	validate(&c2, "c2-after-apply");
-	println!("c2 done: interior={} leaf={}", c2.interior_nodes.len(), c2.leaf_nodes.len());
+	println!(
+		"c2 done: interior={} leaf={}",
+		c2.interior_nodes.len(),
+		c2.leaf_nodes.len()
+	);
 }
