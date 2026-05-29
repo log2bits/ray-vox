@@ -112,13 +112,16 @@ mat_offset  u32   // bit offset into chunk's materials array
 
 ## World Clipmap
 
-- 11 depths (0–10) covering the i32 coord space (2^31 units, ±1 billion).
-- Depth 0 is the coarsest, depth 10 is the finest. Same convention as the chunk tree.
-- All depths are 8^3 chunks with a 2^3 inner cutout that the next finer depth fills.
-- `chunk_size(d) = 256 * 4^(10 - d)`. At depth 0: 2^28 per chunk, 8 * 2^28 = 2^31 total. Exact fit.
-- LOD boundary is always at least 3 cells from the camera. Coarse LOD never shows up close.
+- 11 levels (0–10) covering the i32 coord space.
+- Level 0 is the coarsest, level 10 is the finest. Same convention as the chunk tree.
+- All levels are 8^3 chunks.
+- `chunk_size(d) = 256 * 4^(10 - d)`. At depth 0: 2^28 per chunk, 8 * 2^28 = 2^31 total.
+- Coarsest origin at `-(1 << 30)`. Fixed in world space, never moves.
+- Finer levels snap to their own grid. Origin = camera rounded to `chunk_size(d)`, minus `4 * chunk_size(d)`.
+- Levels overlap rather than partition. Finer level wins at traversal.
+- 4× LOD scaling. Matches the 64-tree's branching: coarser LOD is the same chunk read one depth shallower.
 - Storage: ~11 KB of chunk handles plus 704 bytes occupancy bitmask.
-- Chunk handles are u16. Max 5544 chunks across all depths, well under the 65K cap.
+- Chunk handles are u16. Max 5632 chunks across all depths, well under the 65K cap.
 
 ## Chunk Handle (u16)
 

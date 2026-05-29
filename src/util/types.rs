@@ -1,3 +1,4 @@
+use std::array::from_fn;
 use std::ops::{Add, Index, Mul, Sub};
 
 /// A position in world space, in world units.
@@ -29,23 +30,27 @@ impl WorldPos {
 		WorldPos([f(self.0[0]), f(self.0[1]), f(self.0[2])])
 	}
 
+	pub fn from_fn(f: impl Fn(usize) -> i32) -> Self {
+		WorldPos(from_fn(f))
+	}
+
 	/// Snap to the origin of the chunk containing this position at the given LOD.
-	pub fn snap_to_chunk(self, lod: LodLevel) -> ChunkId {
-		let cs = lod.chunk_size();
+	pub fn chunk_id(self, lod: LodLevel) -> ChunkId {
+		let chunk_size = lod.chunk_size();
 		ChunkId {
-			origin: self.map(|v| v & !(cs - 1)),
+			origin: self.map(|x| align_down(x, chunk_size)),
 			lod,
 		}
 	}
 
 	/// Voxel coordinates within the chunk at the given LOD.
-	pub fn to_chunk_pos(self, chunk_origin: WorldPos, lod: LodLevel) -> ChunkPos {
-		let vs = lod.voxel_size();
-		ChunkPos([
-			((self[0] - chunk_origin[0]) / vs) as u8,
-			((self[1] - chunk_origin[1]) / vs) as u8,
-			((self[2] - chunk_origin[2]) / vs) as u8,
-		])
+	pub fn chunk_pos(self, chunk_origin: WorldPos, lod: LodLevel) -> ChunkPos {
+		let voxel_size = lod.voxel_size();
+		ChunkPos::from_fn(|i| ((self[i] - chunk_origin[i]) / voxel_size) as u8)
+	}
+
+	pub fn chunk_handle(self, lod: LodLevel, camera_pos: WorldPos) -> Option<ChunkHandle> {
+		self.chunk_id(lod).handle(camera_pos)
 	}
 }
 
@@ -110,6 +115,9 @@ impl ChunkPos {
 	pub fn to_array(self) -> [u8; 3] {
 		self.0
 	}
+	pub fn from_fn(f: impl Fn(usize) -> u8) -> Self {
+		ChunkPos(from_fn(f))
+	}
 }
 
 impl From<[u8; 3]> for ChunkPos {
@@ -137,17 +145,24 @@ impl Index<usize> for ChunkPos {
 pub struct LodLevel(u8);
 
 impl LodLevel {
-	pub const COARSEST: Self = LodLevel(0);
-	pub const FINEST: Self = LodLevel(10);
+	pub const GRID_SIZE: u32 = 8;
+	pub const LEVELS: u8 = 11;
+	pub const CHUNKS_PER_LEVEL: u32 = Self::GRID_SIZE * Self::GRID_SIZE * Self::GRID_SIZE;
+	pub const COARSEST: LodLevel = LodLevel(0);
+	pub const FINEST: LodLevel = LodLevel(Self::LEVELS - 1);
 
 	pub fn new(level: u8) -> Self {
-		debug_assert!(level <= 10, "LodLevel {level} out of range 0..=10");
+		debug_assert!(level < Self::LEVELS, "LodLevel {level} out of range");
 		LodLevel(level)
+	}
+
+	pub fn level(self) -> u8 {
+		self.0
 	}
 
 	/// Size of one chunk in world units at this LOD.
 	pub fn chunk_size(self) -> i32 {
-		1i32 << (28 - 2 * self.0 as u32)
+		256 * 4i32.pow((Self::LEVELS as u32 - 1) - self.0 as u32)
 	}
 
 	/// Size of one voxel in world units at this LOD.
@@ -156,18 +171,28 @@ impl LodLevel {
 		self.chunk_size() / 256
 	}
 
-	pub fn is_finest(self) -> bool {
-		self == Self::FINEST
-	}
 	pub fn is_coarsest(self) -> bool {
 		self == Self::COARSEST
 	}
 
-	pub fn finer(self) -> Option<Self> {
-		(self.0 < 10).then(|| LodLevel(self.0 + 1))
+	pub fn is_finest(self) -> bool {
+		self == Self::FINEST
 	}
-	pub fn coarser(self) -> Option<Self> {
-		(self.0 > 0).then(|| LodLevel(self.0 - 1))
+
+	pub fn level_origin(self, camera_pos: WorldPos) -> WorldPos {
+		let chunk_size = self.chunk_size();
+		let half = chunk_size / 2;
+		let total_span = chunk_size * LodLevel::GRID_SIZE as i32;
+		let snapped = camera_pos.chunk_id(self).origin;
+
+		WorldPos::from_fn(|i| {
+			let offset = if camera_pos[i] - snapped[i] < half {
+				4
+			} else {
+				3
+			};
+			(snapped[i] - chunk_size * offset).clamp(i32::MIN, i32::MAX - total_span)
+		})
 	}
 }
 
@@ -199,17 +224,38 @@ impl ChunkHandle {
 	pub fn lod(self) -> LodLevel {
 		LodLevel(((self.0 >> 9) & 0xF) as u8)
 	}
+
 	pub fn x(self) -> u8 {
 		((self.0 >> 6) & 0x7) as u8
 	}
+
 	pub fn y(self) -> u8 {
 		((self.0 >> 3) & 0x7) as u8
 	}
+
 	pub fn z(self) -> u8 {
 		(self.0 & 0x7) as u8
 	}
+
 	pub fn xyz(self) -> [u8; 3] {
 		[self.x(), self.y(), self.z()]
+	}
+
+	pub fn world_origin(self, camera_pos: WorldPos) -> WorldPos {
+		let level_origin = self.lod().level_origin(camera_pos);
+		let chunk_size = self.lod().chunk_size();
+		let xyz = self.xyz();
+		WorldPos::from_fn(|i| level_origin[i] + xyz[i] as i32 * chunk_size)
+	}
+
+	pub fn id(self, camera_pos: WorldPos) -> ChunkId {
+		ChunkId::new(self.world_origin(camera_pos), self.lod())
+	}
+
+	pub fn bit_index(self) -> u32 {
+		(self.x() as u32)
+			+ self.y() as u32 * LodLevel::GRID_SIZE
+			+ self.z() as u32 * LodLevel::GRID_SIZE.pow(2)
 	}
 }
 
@@ -242,4 +288,44 @@ impl ChunkId {
 	pub fn max_corner(self) -> WorldPos {
 		self.origin + WorldPos::splat(self.lod.chunk_size())
 	}
+
+	pub fn handle(self, camera_pos: WorldPos) -> Option<ChunkHandle> {
+		let level_origin = self.lod.level_origin(camera_pos);
+		let chunk_size = self.lod.chunk_size();
+		let grid_size = LodLevel::GRID_SIZE as i32;
+
+		let [x, y, z] = std::array::from_fn(|i| (self.origin[i] - level_origin[i]) / chunk_size);
+
+		if x >= 0 && y >= 0 && z >= 0 && x < grid_size && y < grid_size && z < grid_size {
+			Some(ChunkHandle::new(self.lod, x as u8, y as u8, z as u8))
+		} else {
+			None
+		}
+	}
+}
+
+pub struct LodLevelBitmask([u32; LodLevel::CHUNKS_PER_LEVEL as usize / 32]);
+
+impl LodLevelBitmask {
+	pub const fn new() -> Self {
+		LodLevelBitmask([0; LodLevel::CHUNKS_PER_LEVEL as usize / 32])
+	}
+
+	pub fn get(&self, bit: u32) -> bool {
+		(self.0[bit as usize / 32] >> (bit % 32)) & 1 == 1
+	}
+
+	pub fn set(&mut self, bit: u32) {
+		self.0[bit as usize / 32] |= 1 << (bit % 32);
+	}
+
+	pub fn clear(&mut self, bit: u32) {
+		self.0[bit as usize / 32] &= !(1 << (bit % 32));
+	}
+}
+
+/// Needs alignment to always be a power of 2
+#[inline(always)]
+fn align_down(v: i32, alignment: i32) -> i32 {
+	v & !(alignment - 1)
 }
