@@ -22,11 +22,6 @@ egui = "0.30"
 egui-wgpu = "0.30"
 egui-winit = "0.30"
 
-[[bin]]
-name = "bench"
-path = "src/benches/bench.rs"
-harness = false
-
 [profile.release]
 opt-level = 3
 lto = "thin"

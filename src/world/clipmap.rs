@@ -9,7 +9,6 @@ pub struct Clipmap {
 }
 
 pub enum RemapOp {
-	Move(ChunkHandle, ChunkHandle),
 	Split((ChunkHandle, [Option<ChunkHandle>; 64])),
 	Merge([Option<ChunkHandle>; 64], ChunkHandle),
 	Add(ChunkHandle),

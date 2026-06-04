@@ -49,8 +49,8 @@ impl WorldPos {
 		ChunkPos::from_fn(|i| ((self[i] - chunk_origin[i]) / voxel_size) as u8)
 	}
 
-	pub fn chunk_handle(self, lod: LodLevel, camera_pos: WorldPos) -> Option<ChunkHandle> {
-		self.chunk_id(lod).handle(camera_pos)
+	pub fn chunk_handle(self, lod: LodLevel) -> ChunkHandle {
+		self.chunk_id(lod).handle()
 	}
 }
 
@@ -210,7 +210,8 @@ impl From<LodLevel> for u8 {
 
 /// A chunk identified by its slot in the clipmap grid.
 /// Encodes LOD + (x, y, z) slot (0..8 per axis) into a u16.
-/// Ephemeral - shifts as the camera moves. Not stable across clipmap repositions.
+/// Slots are fixed to world space via toroidal addressing: slot = (chunk_origin / chunk_size) % 8.
+/// Stable across camera movement - only validity (is_in_range) changes as the camera moves.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct ChunkHandle(u16);
@@ -241,15 +242,24 @@ impl ChunkHandle {
 		[self.x(), self.y(), self.z()]
 	}
 
-	pub fn world_origin(self, camera_pos: WorldPos) -> WorldPos {
-		let level_origin = self.lod().level_origin(camera_pos);
+	/// World-space origin of this slot. Independent of camera position.
+	pub fn world_origin(self) -> WorldPos {
 		let chunk_size = self.lod().chunk_size();
 		let xyz = self.xyz();
-		WorldPos::from_fn(|i| level_origin[i] + xyz[i] as i32 * chunk_size)
+		WorldPos::from_fn(|i| xyz[i] as i32 * chunk_size)
 	}
 
-	pub fn id(self, camera_pos: WorldPos) -> ChunkId {
-		ChunkId::new(self.world_origin(camera_pos), self.lod())
+	pub fn id(self) -> ChunkId {
+		ChunkId::new(self.world_origin(), self.lod())
+	}
+
+	/// Whether this slot's world region is currently within the camera's view window.
+	pub fn is_in_range(self, camera_pos: WorldPos) -> bool {
+		let lod = self.lod();
+		let level_min = lod.level_origin(camera_pos);
+		let level_max = level_min + WorldPos::splat(lod.chunk_size() * LodLevel::GRID_SIZE as i32);
+		let origin = self.world_origin();
+		(0..3).all(|i| origin[i] >= level_min[i] && origin[i] < level_max[i])
 	}
 
 	pub fn bit_index(self) -> u32 {
@@ -289,18 +299,14 @@ impl ChunkId {
 		self.origin + WorldPos::splat(self.lod.chunk_size())
 	}
 
-	pub fn handle(self, camera_pos: WorldPos) -> Option<ChunkHandle> {
-		let level_origin = self.lod.level_origin(camera_pos);
+	/// Returns the slot handle for this chunk. Always succeeds - use `handle.is_in_range(camera_pos)`
+	/// to check whether the slot is currently within the camera's view window.
+	pub fn handle(self) -> ChunkHandle {
 		let chunk_size = self.lod.chunk_size();
-		let grid_size = LodLevel::GRID_SIZE as i32;
-
-		let [x, y, z] = std::array::from_fn(|i| (self.origin[i] - level_origin[i]) / chunk_size);
-
-		if x >= 0 && y >= 0 && z >= 0 && x < grid_size && y < grid_size && z < grid_size {
-			Some(ChunkHandle::new(self.lod, x as u8, y as u8, z as u8))
-		} else {
-			None
-		}
+		let [x, y, z] = std::array::from_fn(|i| {
+			(self.origin[i] / chunk_size).rem_euclid(LodLevel::GRID_SIZE as i32) as u8
+		});
+		ChunkHandle::new(self.lod, x, y, z)
 	}
 }
 

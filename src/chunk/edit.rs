@@ -1,5 +1,5 @@
 use crate::chunk::Material;
-use crate::util::types::WorldPos;
+use crate::util::types::{ChunkPos, WorldPos};
 use radsort::sort_by_key;
 use std::ops::Range;
 
@@ -124,8 +124,8 @@ impl From<u32> for Path {
 }
 
 impl Path {
-	pub fn from_coords(position: [u8; 3], depth: u8) -> Self {
-		let [x, y, z] = position;
+	pub fn from_coords(position: ChunkPos, depth: u8) -> Self {
+		let [x, y, z] = <[u8; 3]>::from(position);
 		let slot = |shift: u8| -> u8 {
 			((((x >> shift) & 3) << 4) | (((y >> shift) & 3) << 2) | ((z >> shift) & 3)) + 1
 		};
