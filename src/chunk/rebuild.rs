@@ -416,7 +416,21 @@ impl MutableChunk {
 				CellState::Interior => {
 					InteriorBase::Existing(self.interior_nodes[n.interior_child_index(slot) as usize])
 				}
-				CellState::Leaf => unreachable!("expected interior child at slot {slot}, found leaf"),
+				// Compact demotes childless interiors to leaves at any depth, so a
+				// leaf can sit where editing code expects an interior. Synthesize an
+				// equivalent childless interior whose cells are Filled from the
+				// leaf's slab. Material indexing lines up because both forms use
+				// occupancy.popcount_below for material_index.
+				CellState::Leaf => {
+					let leaf = self.leaf_nodes[n.leaf_child_index(slot) as usize];
+					let mut synth = InteriorNodeWide::default();
+					synth.masks = ChildMasks {
+						has_child: Mask64::EMPTY,
+						is_leaf: leaf.occupancy,
+					};
+					synth.set_material_offset(leaf.material_offset());
+					InteriorBase::Existing(synth)
+				}
 			},
 		}
 	}

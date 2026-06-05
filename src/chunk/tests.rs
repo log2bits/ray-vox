@@ -257,6 +257,34 @@ fn uniform_chunk(m: Material) -> Chunk {
 }
 
 #[test]
+fn deep_edit_into_demoted_leaf_region() {
+	// Packet 1 places two depth-2 fills with different materials in the same depth-1
+	// region. The depth-1 node has only Filled children, so compress demotes it to a
+	// leaf that sits as a Leaf child of the root.
+	let m1 = mat(0x11111140);
+	let m2 = mat(0x22222240);
+	let m3 = mat(0x33333340);
+	let mut p1 = EditPacket::default();
+	p1.push(Path::from_coords(ChunkPos::new(0, 0, 0), 2), m1);
+	p1.push(Path::from_coords(ChunkPos::new(16, 0, 0), 2), m2);
+	let mid = bake_one(Chunk::new(), p1);
+
+	assert_eq!(mid.voxel_at(ChunkPos::new(0, 0, 0)), m1);
+	assert_eq!(mid.voxel_at(ChunkPos::new(16, 0, 0)), m2);
+
+	// Packet 2 edits a single voxel inside the same depth-1 region but outside both
+	// depth-2 fills. Descending into the demoted-leaf slot was a panic before the fix.
+	let target = ChunkPos::new(32, 0, 0);
+	let mut p2 = EditPacket::default();
+	p2.push(Path::from_coords(target, 4), m3);
+	let chunk = bake_one(mid, p2);
+
+	assert_eq!(chunk.voxel_at(target), m3);
+	assert_eq!(chunk.voxel_at(ChunkPos::new(0, 0, 0)), m1);
+	assert_eq!(chunk.voxel_at(ChunkPos::new(16, 0, 0)), m2);
+}
+
+#[test]
 fn sphere_paints_inside_and_leaves_outside_air() {
 	let m = mat(0x778899AA);
 	let chunk_id = ChunkId::new(WorldPos::new(0, 0, 0), LodLevel::FINEST);
@@ -446,6 +474,53 @@ fn property_fill_then_random_carves() {
 
 		brute_apply(&mut brute, e2.clone());
 		let chunk = bake_one(bake_one(Chunk::new(), e1), e2);
+
+		let mut samples = sample_grid();
+		samples.extend(touched);
+		assert_match(&chunk, &brute, &samples);
+	}
+}
+
+#[test]
+fn property_multi_packet_mixed_depths() {
+	let mut rng = SmallRng::seed_from_u64(0xDEADBEEF);
+	let palette = [
+		mat(0x11111140),
+		mat(0x22222240),
+		mat(0x33333340),
+		mat(0x44444440),
+		Material::air(),
+	];
+
+	for _ in 0..16 {
+		let mut chunk = Chunk::new();
+		let mut brute = BruteChunk::default();
+		let mut touched: Vec<ChunkPos> = Vec::new();
+
+		let packets: u32 = rng.r#gen_range(2..=5);
+		for _ in 0..packets {
+			let mut packet = EditPacket::default();
+			let edits: u32 = rng.r#gen_range(1..=16);
+			for _ in 0..edits {
+				let depth: u8 = rng.r#gen_range(1..=4);
+				let step: u32 = 1 << (2 * (4 - depth));
+				let max_cell = 256u32 / step;
+				let cx = rng.r#gen_range(0..max_cell);
+				let cy = rng.r#gen_range(0..max_cell);
+				let cz = rng.r#gen_range(0..max_cell);
+				let pos = ChunkPos::new(
+					(cx * step) as u8,
+					(cy * step) as u8,
+					(cz * step) as u8,
+				);
+				let m = palette[rng.r#gen_range(0..palette.len())];
+				packet.push(Path::from_coords(pos, depth), m);
+				touched.push(pos);
+			}
+			let packet_for_brute = packet.clone();
+			chunk = bake_one(chunk, packet);
+			brute_apply(&mut brute, packet_for_brute);
+		}
 
 		let mut samples = sample_grid();
 		samples.extend(touched);
