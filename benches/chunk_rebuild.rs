@@ -2,7 +2,7 @@ use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criteri
 use ray_vox::chunk::edit::{EditPacket, Path};
 use ray_vox::chunk::material::Material;
 use ray_vox::generate::volume::sphere::Sphere;
-use ray_vox::util::types::{ChunkId, ChunkPos, LodLevel, WorldPos};
+use ray_vox::util::types::{ChunkId, LodLevel, WorldPos};
 use ray_vox::Chunk;
 
 fn chunk_at_origin() -> ChunkId {
@@ -19,29 +19,9 @@ fn bake_one(chunk: Chunk, packet: EditPacket) -> Chunk {
 	mc.bake()
 }
 
-fn small_sphere_positions() -> Vec<ChunkPos> {
-	let mut out = Vec::new();
-	let r = 12i32;
-	for x in 116..=140 {
-		for y in 116..=140 {
-			for z in 116..=140 {
-				let dx = x - 128;
-				let dy = y - 128;
-				let dz = z - 128;
-				if dx * dx + dy * dy + dz * dz <= r * r {
-					out.push(ChunkPos::new(x as u8, y as u8, z as u8));
-				}
-			}
-		}
-	}
-	out
-}
-
 fn bench_apply_edits(c: &mut Criterion) {
 	let stone = Material::from(0x80808040);
 	let air = Material::air();
-
-	let small = small_sphere_positions();
 
 	let mut g = c.benchmark_group("small_workloads");
 	g.throughput(Throughput::Elements(1));
@@ -57,11 +37,7 @@ fn bench_apply_edits(c: &mut Criterion) {
 			let mut fill = EditPacket::default();
 			fill.push(Path::from(0u32), stone);
 			let mid = bake_one(Chunk::new(), fill);
-			let mut carve = EditPacket::default();
-			for &p in &small {
-				carve.push(Path::from_coords(p, 4), air);
-			}
-			black_box(bake_one(mid, carve))
+			black_box(bake_one(mid, sphere_packet(12, air)))
 		})
 	});
 	g.finish();

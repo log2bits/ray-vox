@@ -7,7 +7,8 @@ use super::material::Material;
 use super::merge::merge_lod;
 use super::rebuild::mode_over;
 use super::Chunk;
-use crate::util::types::{ChunkPos, Mask64};
+use crate::generate::volume::sphere::Sphere;
+use crate::util::types::{ChunkId, ChunkPos, LodLevel, Mask64, WorldPos};
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 use std::collections::HashMap;
@@ -253,6 +254,46 @@ fn uniform_chunk(m: Material) -> Chunk {
 	let mut e = EditPacket::default();
 	e.push(Path::from(0u32), m);
 	bake_one(Chunk::new(), e)
+}
+
+#[test]
+fn sphere_paints_inside_and_leaves_outside_air() {
+	let m = mat(0x778899AA);
+	let chunk_id = ChunkId::new(WorldPos::new(0, 0, 0), LodLevel::FINEST);
+	let packet = Sphere::generate(20, chunk_id, WorldPos::new(128, 128, 128), m);
+	let chunk = bake_one(Chunk::new(), packet);
+
+	for (offset, expected) in [
+		([0, 0, 0], m),
+		([10, 5, -5], m),
+		([20, 0, 0], m),
+		([21, 0, 0], Material::air()),
+		([100, 0, 0], Material::air()),
+	] {
+		let pos = ChunkPos::new(
+			(128 + offset[0]) as u8,
+			(128 + offset[1]) as u8,
+			(128 + offset[2]) as u8,
+		);
+		assert_eq!(chunk.voxel_at(pos), expected, "offset {:?}", offset);
+	}
+}
+
+#[test]
+fn sphere_carve_leaves_air_hole_in_filled_chunk() {
+	let stone = mat(0x80808040);
+	let mut fill = EditPacket::default();
+	fill.push(Path::from(0u32), stone);
+	let solid = bake_one(Chunk::new(), fill);
+
+	let chunk_id = ChunkId::new(WorldPos::new(0, 0, 0), LodLevel::FINEST);
+	let carve = Sphere::generate(20, chunk_id, WorldPos::new(128, 128, 128), Material::air());
+	let chunk = bake_one(solid, carve);
+
+	assert_eq!(chunk.voxel_at(ChunkPos::new(128, 128, 128)), Material::air());
+	assert_eq!(chunk.voxel_at(ChunkPos::new(138, 128, 128)), Material::air());
+	assert_eq!(chunk.voxel_at(ChunkPos::new(150, 128, 128)), stone);
+	assert_eq!(chunk.voxel_at(ChunkPos::new(0, 0, 0)), stone);
 }
 
 #[test]
