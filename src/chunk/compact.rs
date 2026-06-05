@@ -1,15 +1,15 @@
 use ahash::AHashMap;
 
 use super::material::Material;
-use super::node::{CellState, InteriorNode, InteriorNodeWide, LeafNode};
+use super::node::{CellState, ChildMasks, InteriorNode, InteriorNodeWide, LeafNode};
+use super::rebuild::mode_over;
 use super::{Chunk, MutableChunk};
 use crate::util::PalettedVec;
+use crate::util::types::Mask64;
 
-/// Compacts and compresses a `MutableChunk` into a `Chunk`.
-///
-/// Removes orphan nodes left by path-copy edits, deduplicates identical subtrees
-/// (DAG sharing), and packs interior node offsets into the 13/19-bit compressed layout.
-pub(crate) fn compress(src: MutableChunk) -> Chunk {
+/// Compact a MutableChunk into a frozen Chunk. Drops orphan nodes left by path-copy
+/// edits, dedupes identical subtrees, and packs offsets into the 13/19-bit layout.
+pub fn compress(src: MutableChunk) -> Chunk {
 	if src.interior_nodes.is_empty() {
 		return Chunk {
 			leaf_nodes: src.leaf_nodes,
@@ -19,356 +19,391 @@ pub(crate) fn compress(src: MutableChunk) -> Chunk {
 	}
 
 	let root = src.interior_nodes.len() as u32 - 1;
-	let (by_depth, reachable_leaf) = collect_reachable(&src.interior_nodes, root);
+	let (by_depth, reachable_leaves) = collect_reachable(&src.interior_nodes, root);
 
-	let mut compressor =
-		Compressor::new(&src.interior_nodes, &src.leaf_nodes, &src.materials);
-	compressor.dedup_leaves(&reachable_leaf);
+	let mut c = Compressor::new(&src.interior_nodes, &src.leaf_nodes, &src.materials);
+
+	// materials[0] is always the chunk-level LOD. Node material_offsets land at 1+.
+	let chunk_lod = compute_chunk_lod(&src.interior_nodes[root as usize], &src.materials);
+	c.push_material(chunk_lod);
+
+	c.dedup_leaves(&reachable_leaves);
 	for depth in (0..3).rev() {
-		compressor.dedup_interior_at_depth(&by_depth[depth]);
+		c.dedup_interior_at_depth(&by_depth[depth]);
 	}
-	compressor.push_root();
+	c.push_root(root);
 
 	Chunk {
-		leaf_nodes: compressor.out_leaf,
-		materials: compressor.out_mat,
-		interior_nodes: compressor.out_interior,
+		leaf_nodes: c.out_leaves,
+		materials: c.out_materials,
+		interior_nodes: c.out_interiors,
 	}
 }
 
 /// Working state for one compress pass.
 ///
-/// Holds the source arrays (read-only), the remap tables from old indices to canonical pool
-/// indices, the canonical pools themselves, and the output arrays where the final contiguous
-/// child blocks are assembled.
+/// Dedup uses hash-and-verify: maps hold u64 content hashes, hits run a full
+/// content compare before merging. A collision with no content match emits a
+/// duplicate canonical, which is statistically unmeasurable but never wrong.
 struct Compressor<'a> {
-	src_interior: &'a [InteriorNodeWide],
-	src_leaf: &'a [LeafNode],
-	src_mat: &'a PalettedVec<Material>,
+	src_interiors: &'a [InteriorNodeWide],
+	src_leaves: &'a [LeafNode],
+	src_materials: &'a PalettedVec<Material>,
 
 	int_remap: Vec<u32>,
 	leaf_remap: Vec<u32>,
-
-	// Interior nodes that were demoted to leaf nodes (has_child == 0, only Filled/Empty slots).
 	demoted: Vec<bool>,
 	demoted_remap: Vec<u32>,
 
 	canonical_interiors: Vec<InteriorNode>,
 	canonical_leaves: Vec<LeafNode>,
+	/// Per-canonical child canonical indices in slot order (interiors then leaves).
+	/// Lets interior_eq compare child structure without walking the output arrays.
+	canonical_int_children: Vec<Vec<u32>>,
 
-	out_interior: Vec<InteriorNode>,
-	out_leaf: Vec<LeafNode>,
-	out_mat: PalettedVec<Material>,
+	out_interiors: Vec<InteriorNode>,
+	out_leaves: Vec<LeafNode>,
+	out_materials: PalettedVec<Material>,
+	/// Transient value-to-index map so push_material is O(1) instead of doing the
+	/// linear scan PalettedVec::push would. Dropped before the frozen Chunk returns.
+	palette_index: AHashMap<Material, u32>,
 
-	leaf_sig_map: AHashMap<u128, u32>,
-	int_sig_map: AHashMap<u128, u32>,
+	leaf_sig_map: AHashMap<u64, u32>,
+	int_sig_map: AHashMap<u64, u32>,
 }
 
 impl<'a> Compressor<'a> {
 	fn new(
-		src_interior: &'a [InteriorNodeWide],
-		src_leaf: &'a [LeafNode],
-		src_mat: &'a PalettedVec<Material>,
+		src_interiors: &'a [InteriorNodeWide],
+		src_leaves: &'a [LeafNode],
+		src_materials: &'a PalettedVec<Material>,
 	) -> Self {
 		Self {
-			src_interior,
-			src_leaf,
-			src_mat,
-			int_remap: vec![0u32; src_interior.len()],
-			leaf_remap: vec![0u32; src_leaf.len()],
-			demoted: vec![false; src_interior.len()],
-			demoted_remap: vec![0u32; src_interior.len()],
+			src_interiors,
+			src_leaves,
+			src_materials,
+			int_remap: vec![0; src_interiors.len()],
+			leaf_remap: vec![0; src_leaves.len()],
+			demoted: vec![false; src_interiors.len()],
+			demoted_remap: vec![0; src_interiors.len()],
 			canonical_interiors: Vec::new(),
 			canonical_leaves: Vec::new(),
-			out_interior: Vec::new(),
-			out_leaf: Vec::new(),
-			out_mat: PalettedVec::new(),
+			canonical_int_children: Vec::new(),
+			out_interiors: Vec::new(),
+			out_leaves: Vec::new(),
+			out_materials: PalettedVec::new(),
+			palette_index: AHashMap::new(),
 			leaf_sig_map: AHashMap::new(),
 			int_sig_map: AHashMap::new(),
 		}
 	}
 
+	/// O(1) replacement for out_materials.push. Preserves first-occurrence ordering
+	/// so palette indices and bit packing come out byte-identical.
+	fn push_material(&mut self, m: Material) {
+		let idx = *self.palette_index.entry(m).or_insert_with(|| {
+			let i = self.out_materials.lut.values.len() as u32;
+			self.out_materials.lut.values.push(m);
+			i
+		});
+		self.out_materials.indices.push(idx);
+	}
+
+	#[inline]
+	fn src_slab_mat(&self, n: &InteriorNodeWide, slot: u8) -> Material {
+		self.src_materials.get(n.material_index(slot))
+	}
+
+	#[inline]
+	fn out_slab_mat(&self, n: &InteriorNode, slot: u8) -> Material {
+		self.out_materials.get(n.material_index(slot))
+	}
+
+	/// Same masks but with demoted interior children re-labeled as leaves.
+	fn apply_demotions(&self, node: &InteriorNodeWide) -> ChildMasks {
+		let src = node.masks;
+		let mut is_leaf = src.is_leaf;
+		for slot in src.interiors().iter_slots() {
+			let child = node.interior_child_index(slot);
+			if self.demoted[child as usize] {
+				is_leaf |= Mask64::bit(slot);
+			}
+		}
+		ChildMasks { has_child: src.has_child, is_leaf }
+	}
+
+	/// Canonical index of the child at this slot. Routes through int_remap,
+	/// demoted_remap, or leaf_remap based on the pre-demotion state.
+	fn child_canonical(&self, node: &InteriorNodeWide, slot: u8) -> u32 {
+		match node.masks.state(slot) {
+			CellState::Interior => {
+				let child = node.interior_child_index(slot);
+				if self.demoted[child as usize] {
+					self.demoted_remap[child as usize]
+				} else {
+					self.int_remap[child as usize]
+				}
+			}
+			CellState::Leaf => self.leaf_remap[node.leaf_child_index(slot) as usize],
+			_ => 0,
+		}
+	}
+
 	fn dedup_leaves(&mut self, reachable: &[u32]) {
 		for &old_idx in reachable {
-			let node = self.src_leaf[old_idx as usize];
-			let sig = self.leaf_sig(node);
-
-			let canonical_idx = if let Some(&idx) = self.leaf_sig_map.get(&sig) {
-				idx
-			} else {
-				let canonical_idx = self.canonical_leaves.len() as u32;
-				let new_mat_offset = self.out_mat.len();
-				let mut mask = node.occupancy();
-				while mask != 0 {
-					let slot = mask.trailing_zeros() as u8;
-					self.out_mat
-						.push(self.src_mat.get(node.material_index(slot)));
-					mask &= mask - 1;
+			let node = self.src_leaves[old_idx as usize];
+			let hash = self.leaf_hash(node);
+			let canonical = match self.leaf_sig_map.get(&hash) {
+				Some(&cand) if self.leaf_eq(node, cand) => cand,
+				_ => {
+					let new_idx = self.emit_canonical_leaf(node.occupancy, |c, s| {
+						c.src_materials.get(node.material_index(s))
+					});
+					self.leaf_sig_map.entry(hash).or_insert(new_idx);
+					new_idx
 				}
-				let mut out = LeafNode::default();
-				out.set_occupancy(node.occupancy());
-				out.set_material_offset(new_mat_offset);
-				self.canonical_leaves.push(out);
-				self.leaf_sig_map.insert(sig, canonical_idx);
-				canonical_idx
 			};
-			self.leaf_remap[old_idx as usize] = canonical_idx;
+			self.leaf_remap[old_idx as usize] = canonical;
 		}
 	}
 
 	fn dedup_interior_at_depth(&mut self, reachable: &[u32]) {
 		self.int_sig_map.clear();
 		for &old_idx in reachable {
-			let node = self.src_interior[old_idx as usize];
+			let node = self.src_interiors[old_idx as usize];
 
-			// Interior node with no actual children (only Filled/Empty slots): demote to leaf.
-			// occupancy() == is_leaf() because has_child == 0.
-			if node.has_child() == 0 {
+			// No real children means only Filled or Empty slots. Demote to a leaf.
+			if node.masks.has_child.is_empty() {
 				let canonical = self.dedup_as_demoted_leaf(node);
 				self.demoted[old_idx as usize] = true;
 				self.demoted_remap[old_idx as usize] = canonical;
 				continue;
 			}
 
-			let sig = self.interior_sig(node);
-			let new_idx = if let Some(&idx) = self.int_sig_map.get(&sig) {
-				idx
-			} else {
-				let new_idx = self.emit_interior_node(node);
-				self.int_sig_map.insert(sig, new_idx);
-				new_idx
+			let hash = self.interior_hash(node);
+			let canonical = match self.int_sig_map.get(&hash) {
+				Some(&cand) if self.interior_eq(node, cand) => cand,
+				_ => {
+					let new_idx = self.emit_interior(node);
+					self.int_sig_map.entry(hash).or_insert(new_idx);
+					new_idx
+				}
 			};
-			self.int_remap[old_idx as usize] = new_idx;
+			self.int_remap[old_idx as usize] = canonical;
 		}
 	}
 
-	/// Converts a childless interior node (only Filled/Empty slots) into a canonical leaf node.
+	/// Turn a childless interior into a canonical leaf.
 	fn dedup_as_demoted_leaf(&mut self, node: InteriorNodeWide) -> u32 {
-		// Filled slots: has_child=0, is_leaf=1. So occupancy for the leaf = node.is_leaf().
-		let occ = node.is_leaf();
+		let occupancy = node.masks.is_leaf;
 		let mut hash = fnv_start();
-		let mut mask = occ;
-		while mask != 0 {
-			let slot = mask.trailing_zeros() as u8;
-			hash = fnv_mix(hash, u32::from(self.src_mat.get(node.material_index(slot))));
-			mask &= mask - 1;
+		for slot in occupancy.iter_slots() {
+			hash = fnv_mix(hash, self.src_slab_mat(&node, slot).into());
 		}
-		let sig = ((occ as u128) << 64) | (hash as u128);
-
-		if let Some(&idx) = self.leaf_sig_map.get(&sig) {
-			return idx;
+		if let Some(&cand) = self.leaf_sig_map.get(&hash) {
+			if self.demoted_eq(node, occupancy, cand) {
+				return cand;
+			}
 		}
+		let new_idx = self.emit_canonical_leaf(occupancy, |c, s| c.src_slab_mat(&node, s));
+		self.leaf_sig_map.entry(hash).or_insert(new_idx);
+		new_idx
+	}
 
+	fn emit_canonical_leaf(
+		&mut self,
+		occupancy: Mask64,
+		mut mat_at: impl FnMut(&Self, u8) -> Material,
+	) -> u32 {
 		let canonical_idx = self.canonical_leaves.len() as u32;
-		let new_mat_offset = self.out_mat.len();
-		let mut mask = occ;
-		while mask != 0 {
-			let slot = mask.trailing_zeros() as u8;
-			self.out_mat.push(self.src_mat.get(node.material_index(slot)));
-			mask &= mask - 1;
+		let mat_offset = self.out_materials.len();
+		for slot in occupancy.iter_slots() {
+			let m = mat_at(self, slot);
+			self.push_material(m);
 		}
 		let mut out = LeafNode::default();
-		out.set_occupancy(occ);
-		out.set_material_offset(new_mat_offset);
+		out.occupancy = occupancy;
+		out.set_material_offset(mat_offset);
 		self.canonical_leaves.push(out);
-		self.leaf_sig_map.insert(sig, canonical_idx);
 		canonical_idx
 	}
 
-	/// Emits a canonical for `node`: appends its child blocks to the output arrays, packs offsets,
-	/// and stores the resulting `InteriorNode` in the canonical pool. Returns the canonical's index.
-	fn emit_interior_node(&mut self, node: InteriorNodeWide) -> u32 {
-		let src_has_child = node.has_child();
-		let src_is_leaf = node.is_leaf();
+	/// Emit a canonical interior. Appends child blocks in slot order, packs offsets,
+	/// and records child canonical indices for later eq verification.
+	fn emit_interior(&mut self, node: InteriorNodeWide) -> u32 {
+		let masks = self.apply_demotions(&node);
+		let n_children = masks.has_child.count() as usize + masks.filled().count() as usize;
 
-		// Build output masks: demoted Interior children become Leaf in the output.
-		let out_has_child = src_has_child;
-		let mut out_is_leaf = src_is_leaf;
-		{
-			let mut mask = src_has_child & !src_is_leaf;
-			while mask != 0 {
-				let slot = mask.trailing_zeros() as u8;
-				let old_child = node.interior_child_index(slot);
-				if self.demoted[old_child as usize] {
-					out_is_leaf |= 1u64 << slot;
-				}
-				mask &= mask - 1;
-			}
+		let interior_ptr = self.out_interiors.len() as u32;
+		let leaf_ptr = self.out_leaves.len() as u32;
+		let mat_offset = self.out_materials.len();
+
+		// Materials: one per occupied slot in slot order.
+		for slot in masks.occupancy().iter_slots() {
+			let mat = self.src_slab_mat(&node, slot);
+			self.push_material(mat);
 		}
 
-		let n_interior = (out_has_child & !out_is_leaf).count_ones() as usize;
-		let n_leaf = (out_has_child & out_is_leaf).count_ones() as usize;
-
-		let new_interior_ptr = self.out_interior.len() as u32;
-		let new_leaf_ptr = self.out_leaf.len() as u32;
-		self.out_interior
-			.resize_with(self.out_interior.len() + n_interior, InteriorNode::default);
-		self.out_leaf
-			.resize_with(self.out_leaf.len() + n_leaf, LeafNode::default);
-
-		let new_mat_offset = self.out_mat.len();
-		let mut int_rank = 0u32;
-		let mut leaf_rank = 0u32;
-
-		let mut mask = src_has_child | src_is_leaf;
-		while mask != 0 {
-			let slot = mask.trailing_zeros() as u8;
-			self.out_mat
-				.push(self.src_mat.get(node.material_index(slot)));
-
-			// Use output state (which may differ from source state for demoted children).
-			let out_state = match ((out_has_child >> slot) & 1, (out_is_leaf >> slot) & 1) {
-				(0, 1) => CellState::Filled,
-				(1, 0) => CellState::Interior,
-				(1, 1) => CellState::Leaf,
-				_ => CellState::Empty,
-			};
-
-			match out_state {
-				CellState::Interior => {
-					let canonical = self.int_remap[node.interior_child_index(slot) as usize];
-					self.out_interior[(new_interior_ptr + int_rank) as usize] =
-						self.canonical_interiors[canonical as usize];
-					int_rank += 1;
-				}
-				CellState::Leaf => {
-					let canonical = match node.state(slot) {
-						CellState::Leaf => {
-							self.leaf_remap[node.leaf_child_index(slot) as usize]
-						}
-						CellState::Interior => {
-							// Was demoted to leaf.
-							self.demoted_remap[node.interior_child_index(slot) as usize]
-						}
-						_ => unreachable!(),
-					};
-					self.out_leaf[(new_leaf_ptr + leaf_rank) as usize] =
-						self.canonical_leaves[canonical as usize];
-					leaf_rank += 1;
-				}
-				_ => {}
-			}
-			mask &= mask - 1;
+		// Interior and leaf child blocks: separately in slot order so popcount-rank
+		// indexing lines up.
+		let mut children: Vec<u32> = Vec::with_capacity(n_children);
+		for slot in masks.interiors().iter_slots() {
+			let canonical = self.child_canonical(&node, slot);
+			let child_node = self.canonical_interiors[canonical as usize];
+			self.out_interiors.push(child_node);
+			children.push(canonical);
+		}
+		for slot in masks.leaves().iter_slots() {
+			let canonical = self.child_canonical(&node, slot);
+			let child_node = self.canonical_leaves[canonical as usize];
+			self.out_leaves.push(child_node);
+			children.push(canonical);
 		}
 
 		let new_idx = self.canonical_interiors.len() as u32;
 		let mut out = InteriorNode::default();
-		out.set_has_child(out_has_child);
-		out.set_is_leaf(out_is_leaf);
-		out.set_interior_offset(new_interior_ptr);
-		out.set_leaf_offset(new_leaf_ptr);
-		out.set_material_offset(new_mat_offset);
+		out.masks = masks;
+		out.set_interior_offset(interior_ptr);
+		out.set_leaf_offset(leaf_ptr);
+		out.set_material_offset(mat_offset);
 		self.canonical_interiors.push(out);
-
+		self.canonical_int_children.push(children);
 		new_idx
 	}
 
-	/// Push the root canonical onto `out_interior` so it sits at `out_interior.len() - 1`,
-	/// where the shader expects it.
-	fn push_root(&mut self) {
-		if let Some(&root) = self.canonical_interiors.last() {
-			self.out_interior.push(root);
+	/// Push the root canonical to its output array. Normal roots go to out_interiors
+	/// at len-1 where the shader looks. Demoted roots go to out_leaves instead.
+	fn push_root(&mut self, root_old_idx: u32) {
+		if self.demoted[root_old_idx as usize] {
+			let canonical = self.demoted_remap[root_old_idx as usize];
+			self.out_leaves.push(self.canonical_leaves[canonical as usize]);
+		} else if let Some(&root) = self.canonical_interiors.last() {
+			self.out_interiors.push(root);
 		}
 	}
 
-	fn leaf_sig(&self, node: LeafNode) -> u128 {
-		let occ = node.occupancy();
+	fn leaf_hash(&self, node: LeafNode) -> u64 {
 		let mut hash = fnv_start();
-		let mut mask = occ;
-		while mask != 0 {
-			let slot = mask.trailing_zeros() as u8;
-			hash = fnv_mix(hash, u32::from(self.src_mat.get(node.material_index(slot))));
-			mask &= mask - 1;
+		hash = fnv_mix(hash, fold_mask(node.occupancy));
+		for slot in node.occupancy.iter_slots() {
+			hash = fnv_mix(hash, self.src_materials.get(node.material_index(slot)).into());
 		}
-		((occ as u128) << 64) | (hash as u128)
+		hash
 	}
 
-	fn interior_sig(&self, node: InteriorNodeWide) -> u128 {
-		let src_has_child = node.has_child();
-		let src_is_leaf = node.is_leaf();
+	fn interior_hash(&self, node: InteriorNodeWide) -> u64 {
+		let masks = self.apply_demotions(&node);
+		let mut hash = fnv_start();
+		hash = fnv_mix(hash, fold_mask(masks.has_child));
+		hash = fnv_mix(hash, fold_mask(masks.is_leaf));
+		for slot in node.masks.occupancy().iter_slots() {
+			hash = fnv_mix(hash, self.src_slab_mat(&node, slot).into());
+			hash = fnv_mix(hash, self.child_canonical(&node, slot));
+		}
+		hash
+	}
 
-		// Reflect demotions in the signature so parents with identical demoted-child
-		// patterns still deduplicate correctly.
-		let out_has_child = src_has_child;
-		let mut out_is_leaf = src_is_leaf;
-		{
-			let mut mask = src_has_child & !src_is_leaf;
-			while mask != 0 {
-				let slot = mask.trailing_zeros() as u8;
-				let old_child = node.interior_child_index(slot);
-				if self.demoted[old_child as usize] {
-					out_is_leaf |= 1u64 << slot;
-				}
-				mask &= mask - 1;
+	fn leaf_eq(&self, node: LeafNode, canonical_idx: u32) -> bool {
+		let c = self.canonical_leaves[canonical_idx as usize];
+		if c.occupancy != node.occupancy {
+			return false;
+		}
+		node.occupancy.iter_slots().all(|slot| {
+			self.src_materials.get(node.material_index(slot))
+				== self.out_materials.get(c.material_index(slot))
+		})
+	}
+
+	fn demoted_eq(&self, node: InteriorNodeWide, occupancy: Mask64, canonical_idx: u32) -> bool {
+		let c = self.canonical_leaves[canonical_idx as usize];
+		if c.occupancy != occupancy {
+			return false;
+		}
+		occupancy.iter_slots().all(|slot| {
+			self.src_slab_mat(&node, slot) == self.out_materials.get(c.material_index(slot))
+		})
+	}
+
+	fn interior_eq(&self, node: InteriorNodeWide, canonical_idx: u32) -> bool {
+		let masks = self.apply_demotions(&node);
+		let c = self.canonical_interiors[canonical_idx as usize];
+		if c.masks.has_child != masks.has_child || c.masks.is_leaf != masks.is_leaf {
+			return false;
+		}
+		// Per-slot materials.
+		for slot in masks.occupancy().iter_slots() {
+			if self.src_slab_mat(&node, slot) != self.out_slab_mat(&c, slot) {
+				return false;
 			}
 		}
-
-		let masks =
-			(out_has_child ^ out_is_leaf.rotate_left(32)) ^ (out_has_child >> 32 | out_is_leaf << 32);
-
-		let mut hash = fnv_start();
-		let mut mask = src_has_child | src_is_leaf;
-		while mask != 0 {
-			let slot = mask.trailing_zeros() as u8;
-			hash = fnv_mix(hash, u32::from(self.src_mat.get(node.material_index(slot))));
-
-			let child_ref = match node.state(slot) {
-				CellState::Interior => {
-					let old_child = node.interior_child_index(slot);
-					if self.demoted[old_child as usize] {
-						self.demoted_remap[old_child as usize]
-					} else {
-						self.int_remap[old_child as usize]
-					}
-				}
-				CellState::Leaf => self.leaf_remap[node.leaf_child_index(slot) as usize],
-				_ => 0,
-			};
-			hash = fnv_mix(hash, child_ref);
-			mask &= mask - 1;
+		// Child canonical indices in the same slot-order interior-then-leaf used at
+		// emit time.
+		let children = &self.canonical_int_children[canonical_idx as usize];
+		let mut i = 0;
+		for slot in masks.interiors().iter_slots() {
+			if children[i] != self.child_canonical(&node, slot) {
+				return false;
+			}
+			i += 1;
 		}
-		((masks as u128) << 64) | (hash as u128)
+		for slot in masks.leaves().iter_slots() {
+			if children[i] != self.child_canonical(&node, slot) {
+				return false;
+			}
+			i += 1;
+		}
+		true
 	}
 }
 
-fn collect_reachable(interior: &[InteriorNodeWide], root: u32) -> ([Vec<u32>; 3], Vec<u32>) {
+/// Mode of the root's per-slot representatives. The chunk's whole-volume LOD.
+fn compute_chunk_lod(root: &InteriorNodeWide, materials: &PalettedVec<Material>) -> Material {
+	let occ = root.masks.occupancy();
+	if occ.is_empty() {
+		return Material::air();
+	}
+	let mut mats = [Material::air(); 64];
+	for slot in occ.iter_slots() {
+		mats[slot as usize] = materials.get(root.material_index(slot));
+	}
+	mode_over(occ, &mats)
+}
+
+/// BFS from the root: returns reachable interior indices grouped by depth and a
+/// flat list of reachable leaf indices.
+fn collect_reachable(interiors: &[InteriorNodeWide], root: u32) -> ([Vec<u32>; 3], Vec<u32>) {
 	let mut by_depth: [Vec<u32>; 3] = Default::default();
-	let mut reachable_leaf: Vec<u32> = Vec::new();
+	let mut leaves: Vec<u32> = Vec::new();
 	by_depth[0].push(root);
 
-	for depth in 0..3usize {
+	for depth in 0..3 {
 		let mut i = 0;
 		while i < by_depth[depth].len() {
-			let node = interior[by_depth[depth][i] as usize];
+			let node = interiors[by_depth[depth][i] as usize];
 			i += 1;
-
 			if depth < 2 {
-				let mut mask = node.has_child() & !node.is_leaf();
 				let base = node.interior_offset();
-				let mut rank = 0u32;
-				while mask != 0 {
-					by_depth[depth + 1].push(base + rank);
-					rank += 1;
-					mask &= mask - 1;
+				for (rank, _) in node.masks.interiors().iter_slots().enumerate() {
+					by_depth[depth + 1].push(base + rank as u32);
 				}
 			}
-
-			let mut mask = node.has_child() & node.is_leaf();
 			let base = node.leaf_offset();
-			let mut rank = 0u32;
-			while mask != 0 {
-				reachable_leaf.push(base + rank);
-				rank += 1;
-				mask &= mask - 1;
+			for (rank, _) in node.masks.leaves().iter_slots().enumerate() {
+				leaves.push(base + rank as u32);
 			}
 		}
 		by_depth[depth].sort_unstable();
 		by_depth[depth].dedup();
 	}
+	leaves.sort_unstable();
+	leaves.dedup();
+	(by_depth, leaves)
+}
 
-	reachable_leaf.sort_unstable();
-	reachable_leaf.dedup();
-	(by_depth, reachable_leaf)
+#[inline]
+fn fold_mask(m: Mask64) -> u32 {
+	let v = m.raw();
+	(v as u32) ^ ((v >> 32) as u32)
 }
 
 #[inline(always)]

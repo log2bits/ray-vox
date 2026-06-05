@@ -22,6 +22,18 @@ egui = "0.30"
 egui-wgpu = "0.30"
 egui-winit = "0.30"
 
+[dev-dependencies]
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "chunk_rebuild"
+harness = false
+
 [profile.release]
 opt-level = 3
 lto = "thin"
+
+# Profiling-friendly release build. Use with cargo flamegraph.
+[profile.profiling]
+inherits = "release"
+debug = true

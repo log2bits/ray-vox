@@ -1,7 +1,138 @@
+use bytemuck::{Pod, Zeroable};
 use std::array::from_fn;
-use std::ops::{Add, Index, Mul, Sub};
+use std::ops::{Add, BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Index, Mul, Not, Sub};
 
-/// A position in world space, in world units.
+/// A set of slots indexed 0..63. Wraps u64 with iteration and popcount helpers.
+/// repr(transparent) so it can stand in for u64 in GPU-uploaded structs.
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, Pod, Zeroable)]
+pub struct Mask64(pub u64);
+
+impl Mask64 {
+	pub const EMPTY: Self = Mask64(0);
+	pub const FULL: Self = Mask64(u64::MAX);
+
+	#[inline]
+	pub fn bit(slot: u8) -> Self {
+		Mask64(1u64 << slot)
+	}
+
+	#[inline]
+	pub fn raw(self) -> u64 {
+		self.0
+	}
+
+	#[inline]
+	pub fn contains(self, slot: u8) -> bool {
+		(self.0 >> slot) & 1 != 0
+	}
+
+	#[inline]
+	pub fn count(self) -> u32 {
+		self.0.count_ones()
+	}
+
+	#[inline]
+	pub fn is_empty(self) -> bool {
+		self.0 == 0
+	}
+
+	/// Count of bits strictly below slot.
+	#[inline]
+	pub fn popcount_below(self, slot: u8) -> u32 {
+		(self.0 & ((1u64 << slot) - 1)).count_ones()
+	}
+
+	/// Yield set slot indices in ascending order.
+	#[inline]
+	pub fn iter_slots(self) -> Mask64Iter {
+		Mask64Iter(self.0)
+	}
+}
+
+pub struct Mask64Iter(u64);
+
+impl Iterator for Mask64Iter {
+	type Item = u8;
+	#[inline]
+	fn next(&mut self) -> Option<u8> {
+		if self.0 == 0 {
+			return None;
+		}
+		let slot = self.0.trailing_zeros() as u8;
+		self.0 &= self.0 - 1;
+		Some(slot)
+	}
+}
+
+impl From<u64> for Mask64 {
+	#[inline]
+	fn from(v: u64) -> Self {
+		Mask64(v)
+	}
+}
+
+impl From<Mask64> for u64 {
+	#[inline]
+	fn from(m: Mask64) -> Self {
+		m.0
+	}
+}
+
+impl BitAnd for Mask64 {
+	type Output = Self;
+	#[inline]
+	fn bitand(self, rhs: Self) -> Self {
+		Mask64(self.0 & rhs.0)
+	}
+}
+
+impl BitOr for Mask64 {
+	type Output = Self;
+	#[inline]
+	fn bitor(self, rhs: Self) -> Self {
+		Mask64(self.0 | rhs.0)
+	}
+}
+
+impl BitXor for Mask64 {
+	type Output = Self;
+	#[inline]
+	fn bitxor(self, rhs: Self) -> Self {
+		Mask64(self.0 ^ rhs.0)
+	}
+}
+
+impl Not for Mask64 {
+	type Output = Self;
+	#[inline]
+	fn not(self) -> Self {
+		Mask64(!self.0)
+	}
+}
+
+impl BitAndAssign for Mask64 {
+	#[inline]
+	fn bitand_assign(&mut self, rhs: Self) {
+		self.0 &= rhs.0;
+	}
+}
+
+impl BitOrAssign for Mask64 {
+	#[inline]
+	fn bitor_assign(&mut self, rhs: Self) {
+		self.0 |= rhs.0;
+	}
+}
+
+impl BitXorAssign for Mask64 {
+	#[inline]
+	fn bitxor_assign(&mut self, rhs: Self) {
+		self.0 ^= rhs.0;
+	}
+}
+
+/// Position in world units.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct WorldPos([i32; 3]);
 
@@ -34,7 +165,7 @@ impl WorldPos {
 		WorldPos(from_fn(f))
 	}
 
-	/// Snap to the origin of the chunk containing this position at the given LOD.
+	/// Origin of the chunk containing this position at the given LOD.
 	pub fn chunk_id(self, lod: LodLevel) -> ChunkId {
 		let chunk_size = lod.chunk_size();
 		ChunkId {
@@ -43,7 +174,7 @@ impl WorldPos {
 		}
 	}
 
-	/// Voxel coordinates within the chunk at the given LOD.
+	/// Voxel coordinates within the chunk.
 	pub fn chunk_pos(self, chunk_origin: WorldPos, lod: LodLevel) -> ChunkPos {
 		let voxel_size = lod.voxel_size();
 		ChunkPos::from_fn(|i| ((self[i] - chunk_origin[i]) / voxel_size) as u8)
@@ -94,7 +225,7 @@ impl Mul<i32> for WorldPos {
 	}
 }
 
-/// A voxel position local to a chunk. Each axis is 0..=255.
+/// Voxel position local to a chunk. Each axis is 0..=255.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct ChunkPos([u8; 3]);
 
@@ -139,8 +270,7 @@ impl Index<usize> for ChunkPos {
 	}
 }
 
-/// LOD level within the clipmap.
-/// 0 is coarsest (2^28 world units per chunk), 10 is finest (256 world units per chunk).
+/// LOD level. 0 is coarsest (2^28 units per chunk), 10 is finest (256 units per chunk).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct LodLevel(u8);
 
@@ -160,13 +290,12 @@ impl LodLevel {
 		self.0
 	}
 
-	/// Size of one chunk in world units at this LOD.
+	/// Size of one chunk in world units.
 	pub fn chunk_size(self) -> i32 {
 		256 * 4i32.pow((Self::LEVELS as u32 - 1) - self.0 as u32)
 	}
 
-	/// Size of one voxel in world units at this LOD.
-	/// Each chunk is always 256 voxels per axis.
+	/// Size of one voxel in world units. Each chunk is always 256 voxels per axis.
 	pub fn voxel_size(self) -> i32 {
 		self.chunk_size() / 256
 	}
@@ -177,6 +306,16 @@ impl LodLevel {
 
 	pub fn is_finest(self) -> bool {
 		self == Self::FINEST
+	}
+
+	/// One LOD coarser, or None at the coarsest level.
+	pub fn coarser(self) -> Option<LodLevel> {
+		if self.is_coarsest() { None } else { Some(LodLevel(self.0 - 1)) }
+	}
+
+	/// One LOD finer, or None at the finest level.
+	pub fn finer(self) -> Option<LodLevel> {
+		if self.is_finest() { None } else { Some(LodLevel(self.0 + 1)) }
 	}
 
 	pub fn level_origin(self, camera_pos: WorldPos) -> WorldPos {
@@ -208,10 +347,9 @@ impl From<LodLevel> for u8 {
 	}
 }
 
-/// A chunk identified by its slot in the clipmap grid.
-/// Encodes LOD + (x, y, z) slot (0..8 per axis) into a u16.
-/// Slots are fixed to world space via toroidal addressing: slot = (chunk_origin / chunk_size) % 8.
-/// Stable across camera movement - only validity (is_in_range) changes as the camera moves.
+/// Chunk handle: LOD + (x, y, z) slot (0..8 per axis) packed into a u16. Slots are
+/// fixed to world space via toroidal addressing (slot = origin / chunk_size mod 8).
+/// Stable across camera movement, only is_in_range changes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct ChunkHandle(u16);
@@ -242,7 +380,7 @@ impl ChunkHandle {
 		[self.x(), self.y(), self.z()]
 	}
 
-	/// World-space origin of this slot. Independent of camera position.
+	/// World-space origin of this slot.
 	pub fn world_origin(self) -> WorldPos {
 		let chunk_size = self.lod().chunk_size();
 		let xyz = self.xyz();
@@ -253,7 +391,7 @@ impl ChunkHandle {
 		ChunkId::new(self.world_origin(), self.lod())
 	}
 
-	/// Whether this slot's world region is currently within the camera's view window.
+	/// True if this slot's region lies inside the camera's current view window.
 	pub fn is_in_range(self, camera_pos: WorldPos) -> bool {
 		let lod = self.lod();
 		let level_min = lod.level_origin(camera_pos);
@@ -281,8 +419,8 @@ impl From<ChunkHandle> for u16 {
 	}
 }
 
-/// A chunk identified by its world-space origin and LOD level.
-/// Stable across clipmap repositions - use as the key for persistent chunks.
+/// Chunk identified by world-space origin and LOD. Stable across clipmap moves,
+/// use as the key for persistent chunks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ChunkId {
 	pub origin: WorldPos,
@@ -294,19 +432,74 @@ impl ChunkId {
 		ChunkId { origin, lod }
 	}
 
-	/// The far corner of this chunk in world space.
+	/// Far corner of this chunk.
 	pub fn max_corner(self) -> WorldPos {
 		self.origin + WorldPos::splat(self.lod.chunk_size())
 	}
 
-	/// Returns the slot handle for this chunk. Always succeeds - use `handle.is_in_range(camera_pos)`
-	/// to check whether the slot is currently within the camera's view window.
+	/// Slot handle for this chunk. Always succeeds, use is_in_range to check validity.
 	pub fn handle(self) -> ChunkHandle {
 		let chunk_size = self.lod.chunk_size();
 		let [x, y, z] = std::array::from_fn(|i| {
 			(self.origin[i] / chunk_size).rem_euclid(LodLevel::GRID_SIZE as i32) as u8
 		});
 		ChunkHandle::new(self.lod, x, y, z)
+	}
+
+	/// Bounding box of this chunk.
+	pub fn aabb(self) -> Aabb {
+		Aabb { min: self.origin, max: self.max_corner() }
+	}
+
+	/// One-step-coarser chunk that contains this one. None at the coarsest level.
+	pub fn parent(self) -> Option<ChunkId> {
+		let parent_lod = self.lod.coarser()?;
+		Some(ChunkId {
+			origin: self.origin.map(|c| align_down(c, parent_lod.chunk_size())),
+			lod: parent_lod,
+		})
+	}
+
+	/// The 64 finer chunks that tile this one. None at the finest level. Slot order
+	/// matches Path::from_coords (slot = ((x&3) << 4) | ((y&3) << 2) | (z&3)) so the
+	/// array feeds straight into merge_lod.
+	pub fn children(self) -> Option<[ChunkId; 64]> {
+		let child_lod = self.lod.finer()?;
+		let child_size = child_lod.chunk_size();
+		Some(std::array::from_fn(|slot| {
+			let x = ((slot >> 4) & 3) as i32;
+			let y = ((slot >> 2) & 3) as i32;
+			let z = (slot & 3) as i32;
+			ChunkId {
+				origin: WorldPos::from_fn(|i| self.origin[i] + [x, y, z][i] * child_size),
+				lod: child_lod,
+			}
+		}))
+	}
+}
+
+/// World-space axis-aligned bounding box. Half-open: min inclusive, max exclusive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Aabb {
+	pub min: WorldPos,
+	pub max: WorldPos,
+}
+
+impl Aabb {
+	pub fn new(min: WorldPos, max: WorldPos) -> Self {
+		Self { min, max }
+	}
+
+	pub fn from_chunk(id: ChunkId) -> Self {
+		id.aabb()
+	}
+
+	pub fn intersects(&self, other: &Aabb) -> bool {
+		(0..3).all(|i| self.min[i] < other.max[i] && other.min[i] < self.max[i])
+	}
+
+	pub fn contains(&self, p: WorldPos) -> bool {
+		(0..3).all(|i| self.min[i] <= p[i] && p[i] < self.max[i])
 	}
 }
 
@@ -330,8 +523,66 @@ impl LodLevelBitmask {
 	}
 }
 
-/// Needs alignment to always be a power of 2
+/// alignment must be a power of two.
 #[inline(always)]
 fn align_down(v: i32, alignment: i32) -> i32 {
 	v & !(alignment - 1)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn pos(x: i32, y: i32, z: i32) -> WorldPos {
+		WorldPos::new(x, y, z)
+	}
+
+	#[test]
+	fn aabb_intersects_and_contains() {
+		let a = Aabb::new(pos(0, 0, 0), pos(10, 10, 10));
+		let b = Aabb::new(pos(5, 5, 5), pos(15, 15, 15));
+		let c = Aabb::new(pos(20, 20, 20), pos(30, 30, 30));
+
+		assert!(a.intersects(&b));
+		assert!(!a.intersects(&c));
+		assert!(a.contains(pos(0, 0, 0)));
+		assert!(a.contains(pos(9, 9, 9)));
+		assert!(!a.contains(pos(10, 0, 0)));
+		assert!(!a.contains(pos(-1, 0, 0)));
+	}
+
+	#[test]
+	fn lod_parent_child_roundtrip() {
+		let fine = ChunkId::new(pos(0, 0, 0), LodLevel::FINEST);
+		let parent = fine.parent().expect("finest has a parent");
+		assert!(parent.aabb().contains(fine.origin));
+
+		let children = parent.children().expect("non-finest has children");
+		assert_eq!(children.len(), 64);
+		assert!(children.iter().any(|c| *c == fine));
+	}
+
+	#[test]
+	fn lod_coarsest_has_no_parent_finest_has_no_children() {
+		let coarsest = ChunkId::new(pos(0, 0, 0), LodLevel::COARSEST);
+		assert!(coarsest.parent().is_none());
+
+		let finest = ChunkId::new(pos(0, 0, 0), LodLevel::FINEST);
+		assert!(finest.children().is_none());
+	}
+
+	#[test]
+	fn children_slot_order_matches_path_encoding() {
+		let parent = ChunkId::new(pos(0, 0, 0), LodLevel::new(5));
+		let child_size = LodLevel::new(6).chunk_size();
+		let children = parent.children().unwrap();
+
+		for slot in 0..64 {
+			let x = ((slot >> 4) & 3) as i32;
+			let y = ((slot >> 2) & 3) as i32;
+			let z = (slot & 3) as i32;
+			let expected = pos(x * child_size, y * child_size, z * child_size);
+			assert_eq!(children[slot].origin, expected, "slot {slot}");
+		}
+	}
 }

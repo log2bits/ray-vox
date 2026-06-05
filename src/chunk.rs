@@ -1,21 +1,31 @@
 pub mod compact;
 pub mod edit;
 pub mod material;
+pub mod merge;
 pub mod node;
 pub mod rebuild;
 pub mod stats;
 
+#[cfg(test)]
+mod tests;
+
 use crate::util::PalettedVec;
+use crate::util::types::ChunkPos;
 use bytemuck;
-use edit::ChunkEdits;
+use edit::EditPacket;
 use edit::Path;
 use material::Material;
-use node::{InteriorNode, InteriorNodeWide, LeafNode};
+use node::{CellState, InteriorNode, InteriorNodeWide, LeafNode};
+
+/// What sits at one slot of an interior node. Returned by Chunk::child.
+pub enum Child {
+	Empty,
+	Filled(Material),
+	Interior(u32),
+	Leaf(u32),
+}
 
 /// A chunk in its compressed, GPU-ready form.
-///
-/// To apply edits use [`Chunk::apply_edits`], which decompresses internally,
-/// applies all edits, re-compresses, and returns a new `Chunk`.
 pub struct Chunk {
 	pub leaf_nodes: Vec<LeafNode>,
 	pub materials: PalettedVec<Material>,
@@ -31,10 +41,6 @@ impl Chunk {
 		}
 	}
 
-	pub fn is_root_leaf(&self) -> bool {
-		self.interior_nodes.is_empty() && self.leaf_nodes.len() == 1
-	}
-
 	pub fn is_uniform(&self) -> bool {
 		self.interior_nodes.is_empty() && self.leaf_nodes.is_empty() && self.materials.len() == 1
 	}
@@ -43,8 +49,73 @@ impl Chunk {
 		self.interior_nodes.is_empty() && self.leaf_nodes.is_empty() && self.materials.is_empty()
 	}
 
+	/// Whole-chunk representative material, stored at materials[0]. When both
+	/// node arrays are empty, this is the chunk's uniform fill.
+	pub fn chunk_lod(&self) -> Material {
+		if self.materials.is_empty() {
+			Material::air()
+		} else {
+			self.materials.get(0)
+		}
+	}
+
+	/// Index of the root interior. Only valid when interior_nodes is non-empty.
+	pub fn root_idx(&self) -> u32 {
+		(self.interior_nodes.len() - 1) as u32
+	}
+
+	/// Resolve a slot of an interior into its child kind plus index.
+	pub fn child(&self, node_idx: u32, slot: u8) -> Child {
+		let n = &self.interior_nodes[node_idx as usize];
+		match n.masks.state(slot) {
+			CellState::Empty => Child::Empty,
+			CellState::Filled => Child::Filled(self.materials.get(n.material_index(slot))),
+			CellState::Interior => Child::Interior(n.interior_child_index(slot)),
+			CellState::Leaf => Child::Leaf(n.leaf_child_index(slot)),
+		}
+	}
+
+	/// Material at a voxel position. Air for empty space.
+	pub fn voxel_at(&self, pos: ChunkPos) -> Material {
+		if self.interior_nodes.is_empty() && self.leaf_nodes.is_empty() {
+			return self.chunk_lod();
+		}
+		let path = Path::from_coords(pos, 4);
+		if self.interior_nodes.is_empty() {
+			// Root-leaf: a single leaf at the top, each cell covering 64^3 voxels.
+			let leaf = &self.leaf_nodes[0];
+			let slot = path.slot_at(0);
+			return if leaf.occupancy.contains(slot) {
+				self.materials.get(leaf.material_index(slot))
+			} else {
+				Material::air()
+			};
+		}
+		let mut idx = self.root_idx();
+		for d in 0..3u8 {
+			let slot = path.slot_at(d);
+			match self.child(idx, slot) {
+				Child::Empty => return Material::air(),
+				Child::Filled(m) => return m,
+				Child::Interior(child) => idx = child,
+				Child::Leaf(leaf_idx) => {
+					// Compact can demote interiors into leaves at any depth, so use
+					// the path byte one level deeper than the current interior.
+					let leaf = &self.leaf_nodes[leaf_idx as usize];
+					let lslot = path.slot_at(d + 1);
+					return if leaf.occupancy.contains(lslot) {
+						self.materials.get(leaf.material_index(lslot))
+					} else {
+						Material::air()
+					};
+				}
+			}
+		}
+		Material::air()
+	}
+
 	pub fn gpu_size_bytes(&self) -> u32 {
-		let header = 3 * size_of::<u32>(); // interior_count, leaf_count, material_count
+		let header = 3 * size_of::<u32>();
 		let interior = self.interior_nodes.len() * size_of::<InteriorNode>();
 		let leaf = self.leaf_nodes.len() * size_of::<LeafNode>();
 		let lut = self.materials.lut.len() as usize * size_of::<Material>();
@@ -56,25 +127,14 @@ impl Chunk {
 		bytemuck::cast_slice(&self.interior_nodes)
 	}
 
-	/// Apply a set of edits to this chunk and return the updated chunk.
-	///
-	/// Internally: decompresses → applies edits → compresses.
-	/// Compression happens once at the end, not after each individual edit.
-	pub fn apply_edits(self, edits: ChunkEdits) -> Chunk {
-		let mut editing = self.into_editing();
-		editing.edits = edits;
-		editing.flush_edits();
-		editing.into_compressed()
-	}
-
-	fn into_editing(self) -> MutableChunk {
+	/// Switch into the editable form. Use queue_edit + bake to apply edits.
+	pub fn into_mutable(self) -> MutableChunk {
 		let wide: Vec<InteriorNodeWide> = self
 			.interior_nodes
 			.iter()
 			.map(|n| {
 				let mut w = InteriorNodeWide::default();
-				w.set_has_child(n.has_child());
-				w.set_is_leaf(n.is_leaf());
+				w.masks = n.masks;
 				w.set_interior_offset(n.interior_offset());
 				w.set_leaf_offset(n.leaf_offset());
 				w.set_material_offset(n.material_offset());
@@ -85,7 +145,7 @@ impl Chunk {
 			leaf_nodes: self.leaf_nodes,
 			materials: self.materials,
 			interior_nodes: wide,
-			edits: ChunkEdits::default(),
+			pending: Vec::new(),
 		}
 	}
 }
@@ -106,27 +166,40 @@ impl Clone for Chunk {
 	}
 }
 
-pub(crate) struct MutableChunk {
-	pub(crate) leaf_nodes: Vec<LeafNode>,
-	pub(crate) materials: PalettedVec<Material>,
-	pub(crate) interior_nodes: Vec<InteriorNodeWide>,
-	pub(crate) edits: ChunkEdits,
+pub struct MutableChunk {
+	pub leaf_nodes: Vec<LeafNode>,
+	pub materials: PalettedVec<Material>,
+	pub interior_nodes: Vec<InteriorNodeWide>,
+	pub pending: Vec<EditPacket>,
 }
 
 impl MutableChunk {
-	/// Applies all accumulated edits (sorts, batches, rebuilds) without compressing.
-	pub(crate) fn flush_edits(&mut self) {
-		let mut edits = std::mem::take(&mut self.edits);
-		edits.sort();
-		for batch in &edits.ranges {
-			let start = batch.range.start as usize;
-			let end = batch.range.end as usize;
-			let slice = &edits.edits[start..end];
-			self.apply_batch(slice);
+	/// Empty builder. No nodes, no materials, no pending edits.
+	pub fn empty() -> Self {
+		Self {
+			leaf_nodes: Vec::new(),
+			materials: PalettedVec::new(),
+			interior_nodes: Vec::new(),
+			pending: Vec::new(),
 		}
 	}
 
-	pub(crate) fn apply_batch(&mut self, batch: &[(Path, Material)]) {
+	/// Queue an edit packet for the next bake. Packets are applied in queue order.
+	pub fn queue_edit(&mut self, packet: EditPacket) {
+		self.pending.push(packet);
+	}
+
+	/// Apply all queued packets and compress. Returns a frozen Chunk.
+	pub fn bake(mut self) -> Chunk {
+		let pending = std::mem::take(&mut self.pending);
+		for mut packet in pending {
+			packet.sort();
+			self.apply_batch(&packet.edits);
+		}
+		compact::compress(self)
+	}
+
+	fn apply_batch(&mut self, batch: &[(Path, Material)]) {
 		let root_edit_count = batch.partition_point(|(p, _): &(Path, Material)| p.is_root());
 		let sub_batch = &batch[root_edit_count..];
 
@@ -147,14 +220,15 @@ impl MutableChunk {
 			return;
 		}
 
-		let old_root = self.interior_nodes.last().copied();
-		let expand_fill = if old_root.is_none() && self.materials.len() == 1 {
-			Some(self.materials.get(0))
+		let base = if let Some(root) = self.interior_nodes.last().copied() {
+			rebuild::InteriorBase::Existing(root)
+		} else if self.materials.len() == 1 {
+			rebuild::InteriorBase::Fill(self.materials.get(0))
 		} else {
-			None
+			rebuild::InteriorBase::Empty
 		};
 
-		match self.rebuild_interior(old_root, expand_fill, 0, sub_batch) {
+		match self.rebuild_interior(base, 0, sub_batch) {
 			rebuild::RebuildResult::Empty => {}
 			rebuild::RebuildResult::Filled(mat) => {
 				self.interior_nodes.clear();
@@ -169,9 +243,6 @@ impl MutableChunk {
 		}
 	}
 
-	pub(crate) fn into_compressed(self) -> Chunk {
-		compact::compress(self)
-	}
 }
 
 impl Clone for MutableChunk {
@@ -180,7 +251,7 @@ impl Clone for MutableChunk {
 			leaf_nodes: self.leaf_nodes.clone(),
 			materials: self.materials.clone(),
 			interior_nodes: self.interior_nodes.clone(),
-			edits: self.edits.clone(),
+			pending: self.pending.clone(),
 		}
 	}
 }

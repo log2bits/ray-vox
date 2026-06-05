@@ -1,2 +1,7 @@
 /target
 /assets/scenes/
+
+# profiling artifacts
+perf.data*
+flamegraph.svg
+*.perf

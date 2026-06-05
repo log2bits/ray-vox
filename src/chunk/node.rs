@@ -1,32 +1,11 @@
+use crate::util::types::Mask64;
 use bytemuck::{Pod, Zeroable};
 
-pub const MAX_INTERIOR_NODES: u32 = 64 * 64 + 64 + 1; // 4161
-pub const MAX_LEAF_NODES: u32 = 64 * 64 * 64 + 64 * 64 + 64 + 1; // 266305
+pub const MAX_INTERIOR_NODES: u32 = 64 * 64 + 64 + 1;
+pub const MAX_LEAF_NODES: u32 = 64 * 64 * 64 + 64 * 64 + 64 + 1;
 
-#[repr(C)]
-#[derive(Copy, Clone, Default, Pod, Zeroable)]
-pub struct InteriorNode {
-	has_child: u64,
-	is_leaf: u64,
-	node_offsets: u32, // packed: [12..0] interior_ptr (13 bits), [31..13] leaf_ptr (19 bits)
-	material_offset: u32,
-}
-
-/// Wide form used only during editing - full u32 offsets, no bit-packing.
-#[derive(Copy, Clone, Default)]
-pub struct InteriorNodeWide {
-	has_child: u64,
-	is_leaf: u64,
-	interior_offset: u32,
-	leaf_offset: u32,
-	material_offset: u32,
-}
-
-#[derive(Copy, Clone, Default)]
-pub struct LeafNode {
-	occupancy: u64,
-	material_offset: u32,
-}
+const _: () = assert!(MAX_INTERIOR_NODES <= 1 << 13);
+const _: () = assert!(MAX_LEAF_NODES <= 1 << 19);
 
 pub enum CellState {
 	Empty,
@@ -35,25 +14,110 @@ pub enum CellState {
 	Leaf,
 }
 
+/// The two masks that determine each slot's state. Both InteriorNode and
+/// InteriorNodeWide embed this so the state and rank queries live in one place.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
+pub struct ChildMasks {
+	pub has_child: Mask64,
+	pub is_leaf: Mask64,
+}
+
+impl ChildMasks {
+	#[inline]
+	pub fn new(has_child: u64, is_leaf: u64) -> Self {
+		Self {
+			has_child: Mask64(has_child),
+			is_leaf: Mask64(is_leaf),
+		}
+	}
+
+	#[inline]
+	pub fn state(&self, slot: u8) -> CellState {
+		match (self.has_child.contains(slot), self.is_leaf.contains(slot)) {
+			(false, false) => CellState::Empty,
+			(false, true) => CellState::Filled,
+			(true, false) => CellState::Interior,
+			(true, true) => CellState::Leaf,
+		}
+	}
+
+	#[inline]
+	pub fn set_state(&mut self, slot: u8, state: CellState) {
+		let bit = Mask64::bit(slot);
+		let (has, leaf) = match state {
+			CellState::Empty => (false, false),
+			CellState::Filled => (false, true),
+			CellState::Interior => (true, false),
+			CellState::Leaf => (true, true),
+		};
+		if has { self.has_child |= bit; } else { self.has_child &= !bit; }
+		if leaf { self.is_leaf |= bit; } else { self.is_leaf &= !bit; }
+	}
+
+	#[inline]
+	pub fn occupancy(&self) -> Mask64 {
+		self.has_child | self.is_leaf
+	}
+
+	#[inline]
+	pub fn interiors(&self) -> Mask64 {
+		self.has_child & !self.is_leaf
+	}
+
+	#[inline]
+	pub fn leaves(&self) -> Mask64 {
+		self.has_child & self.is_leaf
+	}
+
+	#[inline]
+	pub fn filled(&self) -> Mask64 {
+		!self.has_child & self.is_leaf
+	}
+
+	#[inline]
+	pub fn interior_rank(&self, slot: u8) -> u32 {
+		self.interiors().popcount_below(slot)
+	}
+
+	#[inline]
+	pub fn leaf_rank(&self, slot: u8) -> u32 {
+		self.leaves().popcount_below(slot)
+	}
+
+	#[inline]
+	pub fn material_rank(&self, slot: u8) -> u32 {
+		self.occupancy().popcount_below(slot)
+	}
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Default, Pod, Zeroable)]
+pub struct InteriorNode {
+	pub masks: ChildMasks,
+	// Bits 0..13 hold interior_ptr, bits 13..32 hold leaf_ptr.
+	node_offsets: u32,
+	material_offset: u32,
+}
+
+/// Edit-time form of an interior node. Full u32 offsets instead of packed bits.
+#[derive(Copy, Clone, Default)]
+pub struct InteriorNodeWide {
+	pub masks: ChildMasks,
+	interior_offset: u32,
+	leaf_offset: u32,
+	material_offset: u32,
+}
+
+#[derive(Copy, Clone, Default)]
+pub struct LeafNode {
+	pub occupancy: Mask64,
+	material_offset: u32,
+}
+
 impl InteriorNode {
 	pub fn new() -> Self {
 		Self::default()
-	}
-
-	pub fn has_child(&self) -> u64 {
-		self.has_child
-	}
-
-	pub fn set_has_child(&mut self, mask: u64) {
-		self.has_child = mask;
-	}
-
-	pub fn is_leaf(&self) -> u64 {
-		self.is_leaf
-	}
-
-	pub fn set_is_leaf(&mut self, mask: u64) {
-		self.is_leaf = mask;
 	}
 
 	pub fn material_offset(&self) -> u32 {
@@ -92,97 +156,22 @@ impl InteriorNode {
 		self.node_offsets = (self.node_offsets & 0x1FFF) | ((offset & 0x7FFFF) << 13);
 	}
 
-	pub fn state(&self, slot: u8) -> CellState {
-		match ((self.has_child >> slot) & 1, (self.is_leaf >> slot) & 1) {
-			(0, 0) => CellState::Empty,
-			(0, 1) => CellState::Filled,
-			(1, 0) => CellState::Interior,
-			(1, 1) => CellState::Leaf,
-			_ => unreachable!(),
-		}
-	}
-
-	pub fn set_state(&mut self, slot: u8, state: CellState) {
-		match state {
-			CellState::Empty => {
-				self.has_child &= !(1u64 << slot);
-				self.is_leaf &= !(1u64 << slot);
-			}
-			CellState::Filled => {
-				self.has_child &= !(1u64 << slot);
-				self.is_leaf |= 1u64 << slot;
-			}
-			CellState::Interior => {
-				self.has_child |= 1u64 << slot;
-				self.is_leaf &= !(1u64 << slot);
-			}
-			CellState::Leaf => {
-				self.has_child |= 1u64 << slot;
-				self.is_leaf |= 1u64 << slot;
-			}
-		}
-	}
-
-	pub fn occupancy(&self) -> u64 {
-		self.has_child | self.is_leaf
-	}
-
-	pub fn occupied_count(&self) -> u32 {
-		self.occupancy().count_ones()
-	}
-
-	pub fn is_occupied(&self, slot: u8) -> bool {
-		(self.occupancy() >> slot) & 1 != 0
-	}
-
-	pub fn is_empty_slot(&self, slot: u8) -> bool {
-		(self.occupancy() >> slot) & 1 == 0
-	}
-
-	pub fn interior_child_count(&self) -> u32 {
-		(self.has_child & !self.is_leaf).count_ones()
-	}
-
-	pub fn leaf_child_count(&self) -> u32 {
-		(self.has_child & self.is_leaf).count_ones()
-	}
-
-	pub fn filled_count(&self) -> u32 {
-		(!self.has_child & self.is_leaf).count_ones()
-	}
-
 	pub fn interior_child_index(&self, slot: u8) -> u32 {
-		self.interior_offset() + popcount_below(self.has_child & !self.is_leaf, slot)
+		self.interior_offset() + self.masks.interior_rank(slot)
 	}
 
 	pub fn leaf_child_index(&self, slot: u8) -> u32 {
-		self.leaf_offset() + popcount_below(self.has_child & self.is_leaf, slot)
+		self.leaf_offset() + self.masks.leaf_rank(slot)
 	}
 
 	pub fn material_index(&self, slot: u8) -> u32 {
-		self.material_offset + popcount_below(self.occupancy(), slot)
+		self.material_offset + self.masks.material_rank(slot)
 	}
 }
 
 impl InteriorNodeWide {
 	pub fn new() -> Self {
 		Self::default()
-	}
-
-	pub fn has_child(&self) -> u64 {
-		self.has_child
-	}
-
-	pub fn set_has_child(&mut self, mask: u64) {
-		self.has_child = mask;
-	}
-
-	pub fn is_leaf(&self) -> u64 {
-		self.is_leaf
-	}
-
-	pub fn set_is_leaf(&mut self, mask: u64) {
-		self.is_leaf = mask;
 	}
 
 	pub fn interior_offset(&self) -> u32 {
@@ -209,68 +198,22 @@ impl InteriorNodeWide {
 		self.material_offset = offset;
 	}
 
-	pub fn state(&self, slot: u8) -> CellState {
-		match ((self.has_child >> slot) & 1, (self.is_leaf >> slot) & 1) {
-			(0, 0) => CellState::Empty,
-			(0, 1) => CellState::Filled,
-			(1, 0) => CellState::Interior,
-			(1, 1) => CellState::Leaf,
-			_ => unreachable!(),
-		}
-	}
-
-	pub fn occupancy(&self) -> u64 {
-		self.has_child | self.is_leaf
-	}
-
-	pub fn occupied_count(&self) -> u32 {
-		self.occupancy().count_ones()
-	}
-
-	pub fn is_occupied(&self, slot: u8) -> bool {
-		(self.occupancy() >> slot) & 1 != 0
-	}
-
-	pub fn is_empty_slot(&self, slot: u8) -> bool {
-		(self.occupancy() >> slot) & 1 == 0
-	}
-
-	pub fn interior_child_count(&self) -> u32 {
-		(self.has_child & !self.is_leaf).count_ones()
-	}
-
-	pub fn leaf_child_count(&self) -> u32 {
-		(self.has_child & self.is_leaf).count_ones()
-	}
-
-	pub fn filled_count(&self) -> u32 {
-		(!self.has_child & self.is_leaf).count_ones()
-	}
-
 	pub fn interior_child_index(&self, slot: u8) -> u32 {
-		self.interior_offset + popcount_below(self.has_child & !self.is_leaf, slot)
+		self.interior_offset + self.masks.interior_rank(slot)
 	}
 
 	pub fn leaf_child_index(&self, slot: u8) -> u32 {
-		self.leaf_offset + popcount_below(self.has_child & self.is_leaf, slot)
+		self.leaf_offset + self.masks.leaf_rank(slot)
 	}
 
 	pub fn material_index(&self, slot: u8) -> u32 {
-		self.material_offset + popcount_below(self.occupancy(), slot)
+		self.material_offset + self.masks.material_rank(slot)
 	}
 }
 
 impl LeafNode {
 	pub fn new() -> Self {
 		Self::default()
-	}
-
-	pub fn occupancy(&self) -> u64 {
-		self.occupancy
-	}
-
-	pub fn set_occupancy(&mut self, mask: u64) {
-		self.occupancy = mask;
 	}
 
 	pub fn material_offset(&self) -> u32 {
@@ -281,31 +224,7 @@ impl LeafNode {
 		self.material_offset = offset;
 	}
 
-	pub fn occupied_count(&self) -> u32 {
-		self.occupancy.count_ones()
-	}
-
-	pub fn is_occupied(&self, slot: u8) -> bool {
-		(self.occupancy >> slot) & 1 != 0
-	}
-
-	pub fn is_empty_slot(&self, slot: u8) -> bool {
-		(self.occupancy >> slot) & 1 == 0
-	}
-
-	pub fn set_occupied(&mut self, slot: u8) {
-		self.occupancy |= 1u64 << slot;
-	}
-
-	pub fn clear_occupied(&mut self, slot: u8) {
-		self.occupancy &= !(1u64 << slot);
-	}
-
 	pub fn material_index(&self, slot: u8) -> u32 {
-		self.material_offset + popcount_below(self.occupancy, slot)
+		self.material_offset + self.occupancy.popcount_below(slot)
 	}
-}
-
-pub fn popcount_below(mask: u64, slot: u8) -> u32 {
-	(mask & ((1u64 << slot) - 1)).count_ones()
 }
