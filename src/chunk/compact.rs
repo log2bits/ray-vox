@@ -25,7 +25,7 @@ pub fn compress(src: MutableChunk) -> Chunk {
 
 	// materials[0] is always the chunk-level LOD. Node material_offsets land at 1+.
 	let chunk_lod = compute_chunk_lod(&src.interior_nodes[root as usize], &src.materials);
-	c.push_material(chunk_lod);
+	c.emit_material_run(&[chunk_lod]);
 
 	c.dedup_leaves(&reachable_leaves);
 	for depth in (0..3).rev() {
@@ -67,6 +67,10 @@ struct Compressor<'a> {
 	/// Transient value-to-index map so push_material is O(1) instead of doing the
 	/// linear scan PalettedVec::push would. Dropped before the frozen Chunk returns.
 	palette_index: AHashMap<Material, u32>,
+	/// Hash of an emitted material run to its starting entry offset. Lets a new node
+	/// whose slab is identical to an already-emitted run share that offset instead of
+	/// duplicating the entries. Verified by content compare to avoid hash collisions.
+	run_index: AHashMap<u64, u32>,
 
 	leaf_sig_map: AHashMap<u64, u32>,
 	int_sig_map: AHashMap<u64, u32>,
@@ -93,6 +97,7 @@ impl<'a> Compressor<'a> {
 			out_leaves: Vec::new(),
 			out_materials: PalettedVec::new(),
 			palette_index: AHashMap::new(),
+			run_index: AHashMap::new(),
 			leaf_sig_map: AHashMap::new(),
 			int_sig_map: AHashMap::new(),
 		}
@@ -107,6 +112,34 @@ impl<'a> Compressor<'a> {
 			i
 		});
 		self.out_materials.indices.push(idx);
+	}
+
+	/// Reserve a contiguous range of material entries for a node's slab. If the
+	/// same exact sequence has already been emitted, returns the existing offset
+	/// instead of duplicating it. Verifies content on a hash hit to be safe against
+	/// collisions.
+	fn emit_material_run(&mut self, run: &[Material]) -> u32 {
+		let hash = hash_run(run);
+		if let Some(&offset) = self.run_index.get(&hash) {
+			if self.run_matches_at(offset, run) {
+				return offset;
+			}
+		}
+		let offset = self.out_materials.len();
+		for &m in run {
+			self.push_material(m);
+		}
+		self.run_index.entry(hash).or_insert(offset);
+		offset
+	}
+
+	fn run_matches_at(&self, offset: u32, run: &[Material]) -> bool {
+		if offset + run.len() as u32 > self.out_materials.len() {
+			return false;
+		}
+		run.iter()
+			.enumerate()
+			.all(|(i, &m)| self.out_materials.get(offset + i as u32) == m)
 	}
 
 	#[inline]
@@ -216,11 +249,13 @@ impl<'a> Compressor<'a> {
 		mut mat_at: impl FnMut(&Self, u8) -> Material,
 	) -> u32 {
 		let canonical_idx = self.canonical_leaves.len() as u32;
-		let mat_offset = self.out_materials.len();
+		let mut run = [Material::air(); 64];
+		let mut len = 0usize;
 		for slot in occupancy.iter_slots() {
-			let m = mat_at(self, slot);
-			self.push_material(m);
+			run[len] = mat_at(self, slot);
+			len += 1;
 		}
+		let mat_offset = self.emit_material_run(&run[..len]);
 		let mut out = LeafNode::default();
 		out.occupancy = occupancy;
 		out.set_material_offset(mat_offset);
@@ -236,13 +271,15 @@ impl<'a> Compressor<'a> {
 
 		let interior_ptr = self.out_interiors.len() as u32;
 		let leaf_ptr = self.out_leaves.len() as u32;
-		let mat_offset = self.out_materials.len();
 
 		// Materials: one per occupied slot in slot order.
+		let mut run = [Material::air(); 64];
+		let mut len = 0usize;
 		for slot in masks.occupancy().iter_slots() {
-			let mat = self.src_slab_mat(&node, slot);
-			self.push_material(mat);
+			run[len] = self.src_slab_mat(&node, slot);
+			len += 1;
 		}
+		let mat_offset = self.emit_material_run(&run[..len]);
 
 		// Interior and leaf child blocks: separately in slot order so popcount-rank
 		// indexing lines up.
@@ -414,4 +451,12 @@ fn fnv_start() -> u64 {
 #[inline(always)]
 fn fnv_mix(hash: u64, value: u32) -> u64 {
 	(hash ^ value as u64).wrapping_mul(0x100000001b3)
+}
+
+fn hash_run(run: &[Material]) -> u64 {
+	let mut h = fnv_start();
+	for &m in run {
+		h = fnv_mix(h, u32::from(m));
+	}
+	h
 }

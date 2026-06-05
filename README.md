@@ -109,6 +109,7 @@ mat_offset  u32   // bit offset into chunk's materials array
 - Entries can straddle a 32-bit word boundary. Extraction always loads two words and masks unconditionally, keeping the code branchless and warp-coherent.
 - Both interior `mat_offset` (filled children) and leaf `mat_offset` (cells) write into the same shared per-chunk bitpacked array.
 - Mid-tree fills and bottom-level leaf entries sit side by side.
+- Exact-run dedup during compaction: identical material runs share a single offset via a hash-and-verify index. Collapses the materials slab to near-zero for uniform-material regions (e.g. ~99% reduction on a single-material r=128 sphere).
 
 ## World Clipmap
 
