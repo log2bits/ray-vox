@@ -1,27 +1,25 @@
-pub mod import;
-pub mod terrain;
+pub mod model;
 pub mod volume;
 
-use crate::chunk::edit::{EditPacket, Path};
-use crate::chunk::material::Material;
-use crate::util::types::{ChunkId, WorldPos};
-use crate::world::clipmap::Clipmap;
-use std::array::from_fn;
+use crate::chunk::edit::EditPacket;
+use crate::util::types::{Aabb, ChunkId};
 
-/// Lazy edits span the world but are evaluated one chunk at a time on demand.
-/// Terrain, volumes, and other procedural content implement this.
-pub trait LazyEdit: Send + Sync {
-	fn generate(&self, handle: ChunkId) -> EditPacket;
-}
+/// Resolution-independent description of a world modification.
+///
+/// An Edit is sampled per chunk at that chunk's LOD: the cost scales with the
+/// output (how many voxels the chunk has at its level), not with the shape's
+/// nominal size. A trillion-voxel sphere sampled against a coarse distant chunk
+/// produces a coarse cheap packet; the same sphere against a fine chunk near the
+/// camera produces full detail. The clipmap's chunk-LOD assignment is what makes
+/// distance-based cost falloff automatic.
+///
+/// The world keeps edits in a list, culls by `bounds()` overlap when generating
+/// a chunk, and calls `sample` on each surviving edit.
+pub trait Edit: Send + Sync {
+	/// World-space extent. Used to skip chunks the edit can't possibly touch.
+	fn bounds(&self) -> Aabb;
 
-/// Eager edits are evaluated once upfront and produce edits for every chunk they cover.
-/// The world applies these to persistent chunks immediately and discards the generator.
-pub trait EagerEdit: Send + Sync {
-	fn generate(&self) -> Vec<EditPacket>;
-}
-
-pub enum CellState {
-	Empty,
-	Uniform(Material),
-	Subdivide,
+	/// This edit's contribution to one chunk, sampled at the chunk's LOD.
+	/// Returns an empty packet when the edit produces no voxels in this chunk.
+	fn sample(&self, chunk: ChunkId) -> EditPacket;
 }

@@ -9,11 +9,11 @@ use chunk_pool::ChunkPool;
 pub use pbr::Pbr;
 use std::collections::HashMap;
 
-use crate::generate::LazyEdit;
+use crate::generate::Edit;
 use clipmap::Clipmap;
 
 pub struct World {
-	pub edits: Vec<Box<dyn LazyEdit>>,
+	pub edits: Vec<Box<dyn Edit>>,
 	pub chunk_pool: ChunkPool,
 	pub persistent_chunks: HashMap<WorldPos, Chunk>,
 	pub clipmap: Clipmap,

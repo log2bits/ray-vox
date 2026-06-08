@@ -33,9 +33,11 @@ pub fn compress(src: MutableChunk) -> Chunk {
 	}
 	c.push_root(root);
 
+	let mut materials = c.out_materials;
+	materials.shrink_to_fit();
 	Chunk {
 		leaf_nodes: c.out_leaves,
-		materials: c.out_materials,
+		materials,
 		interior_nodes: c.out_interiors,
 	}
 }
@@ -64,9 +66,6 @@ struct Compressor<'a> {
 	out_interiors: Vec<InteriorNode>,
 	out_leaves: Vec<LeafNode>,
 	out_materials: PalettedVec<Material>,
-	/// Transient value-to-index map so push_material is O(1) instead of doing the
-	/// linear scan PalettedVec::push would. Dropped before the frozen Chunk returns.
-	palette_index: AHashMap<Material, u32>,
 	/// Hash of an emitted material run to its starting entry offset. Lets a new node
 	/// whose slab is identical to an already-emitted run share that offset instead of
 	/// duplicating the entries. Verified by content compare to avoid hash collisions.
@@ -96,22 +95,10 @@ impl<'a> Compressor<'a> {
 			out_interiors: Vec::new(),
 			out_leaves: Vec::new(),
 			out_materials: PalettedVec::new(),
-			palette_index: AHashMap::new(),
 			run_index: AHashMap::new(),
 			leaf_sig_map: AHashMap::new(),
 			int_sig_map: AHashMap::new(),
 		}
-	}
-
-	/// O(1) replacement for out_materials.push. Preserves first-occurrence ordering
-	/// so palette indices and bit packing come out byte-identical.
-	fn push_material(&mut self, m: Material) {
-		let idx = *self.palette_index.entry(m).or_insert_with(|| {
-			let i = self.out_materials.lut.values.len() as u32;
-			self.out_materials.lut.values.push(m);
-			i
-		});
-		self.out_materials.indices.push(idx);
 	}
 
 	/// Reserve a contiguous range of material entries for a node's slab. If the
@@ -127,7 +114,7 @@ impl<'a> Compressor<'a> {
 		}
 		let offset = self.out_materials.len();
 		for &m in run {
-			self.push_material(m);
+			self.out_materials.push(m);
 		}
 		self.run_index.entry(hash).or_insert(offset);
 		offset

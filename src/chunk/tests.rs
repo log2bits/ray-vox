@@ -8,6 +8,7 @@ use super::merge::merge_lod;
 use super::rebuild::mode_over;
 use super::Chunk;
 use crate::generate::volume::sphere::Sphere;
+use crate::generate::Edit;
 use crate::util::types::{ChunkId, ChunkPos, LodLevel, Mask64, WorldPos};
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
@@ -288,7 +289,7 @@ fn deep_edit_into_demoted_leaf_region() {
 fn sphere_paints_inside_and_leaves_outside_air() {
 	let m = mat(0x778899AA);
 	let chunk_id = ChunkId::new(WorldPos::new(0, 0, 0), LodLevel::FINEST);
-	let packet = Sphere::generate(20, chunk_id, WorldPos::new(128, 128, 128), m);
+	let packet = Sphere::new(WorldPos::new(128, 128, 128), 20, m).sample(chunk_id);
 	let chunk = bake_one(Chunk::new(), packet);
 
 	for (offset, expected) in [
@@ -315,7 +316,7 @@ fn sphere_carve_leaves_air_hole_in_filled_chunk() {
 	let solid = bake_one(Chunk::new(), fill);
 
 	let chunk_id = ChunkId::new(WorldPos::new(0, 0, 0), LodLevel::FINEST);
-	let carve = Sphere::generate(20, chunk_id, WorldPos::new(128, 128, 128), Material::air());
+	let carve = Sphere::new(WorldPos::new(128, 128, 128), 20, Material::air()).sample(chunk_id);
 	let chunk = bake_one(solid, carve);
 
 	assert_eq!(chunk.voxel_at(ChunkPos::new(128, 128, 128)), Material::air());

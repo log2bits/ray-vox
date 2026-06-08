@@ -147,7 +147,8 @@ voxel_world = chunk_world + decode_path(path) * voxel_size[depth]
 
 ## Editing
 
-- World keeps an ordered list of all procedural edits.
+- World keeps an ordered list of all edits.
+- Edits are resolution-independent. They expose a world-space AABB for overlap culling and a `sample(chunk)` method that produces a packet at the chunk's LOD. Cost scales with the output (voxels at that LOD), not the edit's nominal size: a trillion-voxel sphere far from the camera evaluates against a coarse chunk and produces a coarse cheap packet.
 - Stale or new chunks find overlapping edits via AABB and apply them in order.
 - Each chunk has its own ordered edit packet list.
 - Procedural edits arrive pre-sorted. Player edits sort lazily.
@@ -156,6 +157,17 @@ voxel_world = chunk_world + decode_path(path) * voxel_size[depth]
 - Materials live in a bitpacked list with a LUT (same format as chunk material array).
 - Voxel value 0 means air or delete.
 - After an edit, the tree recompacts and DAG dedup runs again.
+
+## Models
+
+Models are precomputed voxelized assets, stored once and stamped many times.
+
+- Imported from gltf, MagicaVoxel `.vox`, or Minecraft `.mca` and voxelized into chunks at a chosen finest LOD.
+- A full mip pyramid (coarsened via the same `merge_lod` the engine uses for LOD chunks) is built at import time and stored alongside the finest level. The pyramid is ~1.6% larger than the finest level alone, since each level has 1/64 the chunks of the one below.
+- Serialized to `.rvox`, a custom format whose layout matches the GPU buffer representation. The same serializer feeds both disk and VRAM uploads.
+- Stamping a model places it in the world at a chunk-grid-snapped translation. Where a clipmap chunk aligns 1:1 with one of the model's mip chunks, the world cell references the model's chunk by handle (one copy in RAM and VRAM, the instancing win). Where the model overlaps terrain or another stamp, the cell bakes a composite chunk.
+- Editing a stamped instance triggers copy-on-write on the affected chunks for that instance.
+- Placement is translation + chunk-snap only. Arbitrary rotation would lose the instance (different voxel grid per placement); 90° rotations are possible via separately cached rotated variants.
 
 ## GPU Memory
 
@@ -289,6 +301,8 @@ Entry (8 bytes):
 - 4 bits are left unused in the voxel format, reserved for future use.
 
 # Voxel Import Formats
+
+Each importer voxelizes its source into a Model (see above) and serializes to `.rvox`. Models are then stamped into the world rather than imported directly into clipmap chunks.
 
 ## Minecraft (.mca)
 

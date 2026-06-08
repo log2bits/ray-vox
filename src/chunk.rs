@@ -199,7 +199,7 @@ impl MutableChunk {
 		compact::compress(self)
 	}
 
-	fn apply_batch(&mut self, batch: &[(Path, Material)]) {
+	pub fn apply_batch(&mut self, batch: &[(Path, Material)]) {
 		let root_edit_count = batch.partition_point(|(p, _): &(Path, Material)| p.is_root());
 		let sub_batch = &batch[root_edit_count..];
 

@@ -1,5 +1,6 @@
 use crate::util::Lut;
 use crate::util::PackedVec;
+use std::hash::Hash;
 
 #[derive(Clone)]
 pub struct PalettedVec<T> {
@@ -7,7 +8,7 @@ pub struct PalettedVec<T> {
 	pub indices: PackedVec,
 }
 
-impl<T: PartialEq + Copy + Into<u32>> PalettedVec<T> {
+impl<T: PartialEq + Eq + Hash + Copy + Into<u32>> PalettedVec<T> {
 	pub fn new() -> Self {
 		Self {
 			lut: Lut::new(),
@@ -35,6 +36,11 @@ impl<T: PartialEq + Copy + Into<u32>> PalettedVec<T> {
 	pub fn clear(&mut self) {
 		self.lut.clear();
 		self.indices.clear();
+	}
+
+	/// Drop the build-time acceleration map. Call before storing long-term.
+	pub fn shrink_to_fit(&mut self) {
+		self.lut.shrink_to_fit();
 	}
 
 	pub fn bit_width(&self) -> u32 {

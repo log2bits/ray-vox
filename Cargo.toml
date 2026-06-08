@@ -22,11 +22,8 @@ egui = "0.30"
 egui-wgpu = "0.30"
 egui-winit = "0.30"
 
-[dev-dependencies]
-criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
-
 [[bench]]
-name = "chunk_rebuild"
+name = "bench_sphere"
 harness = false
 
 [profile.release]
