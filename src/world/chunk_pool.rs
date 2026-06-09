@@ -1,23 +1,21 @@
 use crate::chunk::Chunk;
-use crate::util::types::ChunkId;
+use crate::util::types::ChunkHandle;
+use crate::world::clipmap::RemapOp;
 use std::collections::{HashMap, HashSet};
 
 pub struct ChunkPool {
-	// CPU side
-	pub chunks: HashMap<ChunkId, Chunk>,
-
-	// GPU allocation tracking
-	pub allocations: HashMap<ChunkId, Allocation>,
+	pub chunks: HashMap<ChunkHandle, Chunk>,
+	pub allocations: HashMap<ChunkHandle, Allocation>,
 	pub free_list: Vec<Allocation>,
-	pub dirty: HashSet<ChunkId>,
+	pub dirty: HashSet<ChunkHandle>,
 	// TODO: gpu_buffer: wgpu::Buffer,
 	// TODO: staging_belt: wgpu::util::StagingBelt,
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct Allocation {
-	pub offset: u32, // bytes
-	pub size: u32,   // bytes
+	pub offset: u32,
+	pub size: u32,
 }
 
 impl ChunkPool {
@@ -30,14 +28,23 @@ impl ChunkPool {
 		}
 	}
 
-	pub fn insert(&mut self, handle: ChunkId, chunk: Chunk) {
-		let alloc = self.alloc(chunk.gpu_size_bytes());
+	pub fn insert(&mut self, handle: ChunkHandle, chunk: Chunk) {
+		if let Some(prev) = self.allocations.get(&handle).copied() {
+			if prev.size >= chunk.byte_size() {
+				self.chunks.insert(handle, chunk);
+				self.dirty.insert(handle);
+				return;
+			}
+			self.free_list.push(prev);
+			self.allocations.remove(&handle);
+		}
+		let alloc = self.alloc(chunk.byte_size());
 		self.allocations.insert(handle, alloc);
 		self.chunks.insert(handle, chunk);
 		self.dirty.insert(handle);
 	}
 
-	pub fn remove(&mut self, handle: ChunkId) -> Option<Chunk> {
+	pub fn remove(&mut self, handle: ChunkHandle) -> Option<Chunk> {
 		if let Some(alloc) = self.allocations.remove(&handle) {
 			self.free_list.push(alloc);
 			self.coalesce();
@@ -46,22 +53,19 @@ impl ChunkPool {
 		self.chunks.remove(&handle)
 	}
 
-	pub fn get(&self, handle: ChunkId) -> Option<&Chunk> {
+	pub fn get(&self, handle: ChunkHandle) -> Option<&Chunk> {
 		self.chunks.get(&handle)
 	}
 
-	/// Mutable access marks the chunk dirty for re-upload.
-	pub fn get_mut(&mut self, handle: ChunkId) -> Option<&mut Chunk> {
+	pub fn get_mut(&mut self, handle: ChunkHandle) -> Option<&mut Chunk> {
 		self.dirty.insert(handle);
 		self.chunks.get_mut(&handle)
 	}
 
-	pub fn contains(&self, handle: ChunkId) -> bool {
+	pub fn contains(&self, handle: ChunkHandle) -> bool {
 		self.chunks.contains_key(&handle)
 	}
 
-	/// The current high-water mark of GPU memory usage in bytes.
-	/// The GPU buffer must be at least this large.
 	pub fn high_water_mark(&self) -> u32 {
 		self.allocations
 			.values()
@@ -70,8 +74,16 @@ impl ChunkPool {
 			.unwrap_or(0)
 	}
 
-	/// Upload all dirty chunks to the GPU and clear the dirty set.
-	/// TODO: takes queue: &wgpu::Queue, staging_belt: &mut wgpu::util::StagingBelt
+	pub fn apply_remap(&mut self, op: &RemapOp) {
+		match op {
+			RemapOp::Add(_, _) => {}
+			RemapOp::Delete(h) => {
+				self.remove(*h);
+			}
+		}
+	}
+
+	// TODO: takes queue: &wgpu::Queue, staging_belt: &mut wgpu::util::StagingBelt
 	pub fn flush(&mut self) {
 		for handle in self.dirty.drain() {
 			let Some(chunk) = self.chunks.get(&handle) else {
@@ -80,20 +92,10 @@ impl ChunkPool {
 			let Some(alloc) = self.allocations.get(&handle) else {
 				continue;
 			};
-			// TODO: let mut view = staging_belt.write_buffer(
-			//     encoder,
-			//     &self.gpu_buffer,
-			//     alloc.offset as u64,
-			//     alloc.size,
-			//     device,
-			// );
-			// TODO: chunk.write_to(&mut view);
-			let _ = (chunk, alloc); // remove when wgpu calls are added
+			let _ = (chunk, alloc);
 		}
 	}
 
-	/// First-fit allocation. Grows past the current high-water mark if no
-	/// free slot is large enough.
 	fn alloc(&mut self, size: u32) -> Allocation {
 		if let Some(idx) = self.free_list.iter().position(|s| s.size >= size) {
 			let slot = self.free_list[idx];
@@ -105,19 +107,12 @@ impl ChunkPool {
 			} else {
 				self.free_list.swap_remove(idx);
 			}
-			Allocation {
-				offset: slot.offset,
-				size,
-			}
+			Allocation { offset: slot.offset, size }
 		} else {
-			Allocation {
-				offset: self.high_water_mark(),
-				size,
-			}
+			Allocation { offset: self.high_water_mark(), size }
 		}
 	}
 
-	/// Sort free list by offset and merge adjacent slots.
 	fn coalesce(&mut self) {
 		self.free_list.sort_unstable_by_key(|s| s.offset);
 		let mut i = 0;

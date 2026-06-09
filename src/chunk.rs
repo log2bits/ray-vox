@@ -1,9 +1,8 @@
-pub mod compact;
+pub mod build;
 pub mod edit;
 pub mod material;
-pub mod merge;
 pub mod node;
-pub mod rebuild;
+pub mod sources;
 pub mod stats;
 
 #[cfg(test)]
@@ -12,12 +11,12 @@ mod tests;
 use crate::util::PalettedVec;
 use crate::util::types::ChunkPos;
 use bytemuck;
-use edit::EditPacket;
+use build::Source;
 use edit::Path;
 use material::Material;
-use node::{CellState, InteriorNode, InteriorNodeWide, LeafNode};
+use node::{CellState, InteriorNode, LeafNode};
+use sources::{ChunkSource, Overlay};
 
-/// What sits at one slot of an interior node. Returned by Chunk::child.
 pub enum Child {
 	Empty,
 	Filled(Material),
@@ -25,7 +24,6 @@ pub enum Child {
 	Leaf(u32),
 }
 
-/// A chunk in its compressed, GPU-ready form.
 pub struct Chunk {
 	pub leaf_nodes: Vec<LeafNode>,
 	pub materials: PalettedVec<Material>,
@@ -49,8 +47,6 @@ impl Chunk {
 		self.interior_nodes.is_empty() && self.leaf_nodes.is_empty() && self.materials.is_empty()
 	}
 
-	/// Whole-chunk representative material, stored at materials[0]. When both
-	/// node arrays are empty, this is the chunk's uniform fill.
 	pub fn chunk_lod(&self) -> Material {
 		if self.materials.is_empty() {
 			Material::air()
@@ -59,12 +55,10 @@ impl Chunk {
 		}
 	}
 
-	/// Index of the root interior. Only valid when interior_nodes is non-empty.
 	pub fn root_idx(&self) -> u32 {
 		(self.interior_nodes.len() - 1) as u32
 	}
 
-	/// Resolve a slot of an interior into its child kind plus index.
 	pub fn child(&self, node_idx: u32, slot: u8) -> Child {
 		let n = &self.interior_nodes[node_idx as usize];
 		match n.masks.state(slot) {
@@ -75,14 +69,12 @@ impl Chunk {
 		}
 	}
 
-	/// Material at a voxel position. Air for empty space.
 	pub fn voxel_at(&self, pos: ChunkPos) -> Material {
 		if self.interior_nodes.is_empty() && self.leaf_nodes.is_empty() {
 			return self.chunk_lod();
 		}
 		let path = Path::from_coords(pos, 4);
 		if self.interior_nodes.is_empty() {
-			// Root-leaf: a single leaf at the top, each cell covering 64^3 voxels.
 			let leaf = &self.leaf_nodes[0];
 			let slot = path.slot_at(0);
 			return if leaf.occupancy.contains(slot) {
@@ -99,8 +91,6 @@ impl Chunk {
 				Child::Filled(m) => return m,
 				Child::Interior(child) => idx = child,
 				Child::Leaf(leaf_idx) => {
-					// Compact can demote interiors into leaves at any depth, so use
-					// the path byte one level deeper than the current interior.
 					let leaf = &self.leaf_nodes[leaf_idx as usize];
 					let lslot = path.slot_at(d + 1);
 					return if leaf.occupancy.contains(lslot) {
@@ -114,39 +104,68 @@ impl Chunk {
 		Material::air()
 	}
 
-	pub fn gpu_size_bytes(&self) -> u32 {
-		let header = 3 * size_of::<u32>();
+	pub const HEADER_BYTES: u32 = 6 * 4;
+
+	pub fn byte_size(&self) -> u32 {
+		let header = Chunk::HEADER_BYTES as usize;
 		let interior = self.interior_nodes.len() * size_of::<InteriorNode>();
 		let leaf = self.leaf_nodes.len() * size_of::<LeafNode>();
-		let lut = self.materials.lut.len() as usize * size_of::<Material>();
+		let lut = self.materials.lut.values.len() * size_of::<Material>();
 		let indices = self.materials.indices.words.len() * size_of::<u32>();
 		(header + interior + leaf + lut + indices) as u32
 	}
 
-	pub fn gpu_bytes(&self) -> &[u8] {
-		bytemuck::cast_slice(&self.interior_nodes)
+	fn header_words(&self) -> [u32; 6] {
+		[
+			self.interior_nodes.len() as u32,
+			self.leaf_nodes.len() as u32,
+			self.materials.lut.values.len() as u32,
+			self.materials.indices.len,
+			self.materials.indices.bits,
+			self.materials.indices.words.len() as u32,
+		]
 	}
 
-	/// Switch into the editable form. Use queue_edit + bake to apply edits.
-	pub fn into_mutable(self) -> MutableChunk {
-		let wide: Vec<InteriorNodeWide> = self
-			.interior_nodes
-			.iter()
-			.map(|n| {
-				let mut w = InteriorNodeWide::default();
-				w.masks = n.masks;
-				w.set_interior_offset(n.interior_offset());
-				w.set_leaf_offset(n.leaf_offset());
-				w.set_material_offset(n.material_offset());
-				w
-			})
-			.collect();
-		MutableChunk {
-			leaf_nodes: self.leaf_nodes,
-			materials: self.materials,
-			interior_nodes: wide,
-			pending: Vec::new(),
-		}
+	pub fn write_bytes<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+		w.write_all(bytemuck::cast_slice(&self.header_words()))?;
+		w.write_all(bytemuck::cast_slice(&self.interior_nodes))?;
+		w.write_all(bytemuck::cast_slice(&self.leaf_nodes))?;
+		w.write_all(bytemuck::cast_slice(&self.materials.lut.values))?;
+		w.write_all(bytemuck::cast_slice(&self.materials.indices.words))?;
+		Ok(())
+	}
+
+	pub fn read_bytes<R: std::io::Read>(r: &mut R) -> std::io::Result<Chunk> {
+		let mut header = [0u32; 6];
+		r.read_exact(bytemuck::cast_slice_mut(&mut header))?;
+		let [interior_count, leaf_count, lut_count, indices_len, indices_bits, indices_words] = header;
+
+		let mut interior_nodes = vec![InteriorNode::default(); interior_count as usize];
+		r.read_exact(bytemuck::cast_slice_mut(&mut interior_nodes))?;
+
+		let mut leaf_nodes = vec![LeafNode::default(); leaf_count as usize];
+		r.read_exact(bytemuck::cast_slice_mut(&mut leaf_nodes))?;
+
+		let mut lut_values = vec![Material::default(); lut_count as usize];
+		r.read_exact(bytemuck::cast_slice_mut(&mut lut_values))?;
+
+		let mut indices_words_vec = vec![0u32; indices_words as usize];
+		r.read_exact(bytemuck::cast_slice_mut(&mut indices_words_vec))?;
+
+		let mut materials = PalettedVec::new();
+		materials.lut.values = lut_values;
+		materials.indices = crate::util::PackedVec {
+			words: indices_words_vec,
+			bits: indices_bits,
+			len: indices_len,
+		};
+		Ok(Chunk { leaf_nodes, materials, interior_nodes })
+	}
+
+	pub fn edit<S: Source>(self, source: &S) -> Chunk {
+		let base = ChunkSource::new(&self);
+		let overlay = Overlay::new(base, source.clone());
+		build::build_chunk(&overlay)
 	}
 }
 
@@ -162,96 +181,6 @@ impl Clone for Chunk {
 			leaf_nodes: self.leaf_nodes.clone(),
 			materials: self.materials.clone(),
 			interior_nodes: self.interior_nodes.clone(),
-		}
-	}
-}
-
-pub struct MutableChunk {
-	pub leaf_nodes: Vec<LeafNode>,
-	pub materials: PalettedVec<Material>,
-	pub interior_nodes: Vec<InteriorNodeWide>,
-	pub pending: Vec<EditPacket>,
-}
-
-impl MutableChunk {
-	/// Empty builder. No nodes, no materials, no pending edits.
-	pub fn empty() -> Self {
-		Self {
-			leaf_nodes: Vec::new(),
-			materials: PalettedVec::new(),
-			interior_nodes: Vec::new(),
-			pending: Vec::new(),
-		}
-	}
-
-	/// Queue an edit packet for the next bake. Packets are applied in queue order.
-	pub fn queue_edit(&mut self, packet: EditPacket) {
-		self.pending.push(packet);
-	}
-
-	/// Apply all queued packets and compress. Returns a frozen Chunk.
-	pub fn bake(mut self) -> Chunk {
-		let pending = std::mem::take(&mut self.pending);
-		for mut packet in pending {
-			packet.sort();
-			self.apply_batch(&packet.edits);
-		}
-		compact::compress(self)
-	}
-
-	pub fn apply_batch(&mut self, batch: &[(Path, Material)]) {
-		let root_edit_count = batch.partition_point(|(p, _): &(Path, Material)| p.is_root());
-		let sub_batch = &batch[root_edit_count..];
-
-		if root_edit_count > 0 {
-			let (_, fill_mat) = batch[root_edit_count - 1];
-			self.interior_nodes.clear();
-			self.leaf_nodes.clear();
-			self.materials.clear();
-			if !fill_mat.is_air() {
-				self.materials.push(fill_mat);
-			}
-			if sub_batch.is_empty() {
-				return;
-			}
-		}
-
-		if sub_batch.is_empty() {
-			return;
-		}
-
-		let base = if let Some(root) = self.interior_nodes.last().copied() {
-			rebuild::InteriorBase::Existing(root)
-		} else if self.materials.len() == 1 {
-			rebuild::InteriorBase::Fill(self.materials.get(0))
-		} else {
-			rebuild::InteriorBase::Empty
-		};
-
-		match self.rebuild_interior(base, 0, sub_batch) {
-			rebuild::RebuildResult::Empty => {}
-			rebuild::RebuildResult::Filled(mat) => {
-				self.interior_nodes.clear();
-				self.leaf_nodes.clear();
-				self.materials.clear();
-				self.materials.push(mat);
-			}
-			rebuild::RebuildResult::Interior(_, new_root) => {
-				self.interior_nodes.push(new_root);
-			}
-			rebuild::RebuildResult::Leaf(..) => unreachable!(),
-		}
-	}
-
-}
-
-impl Clone for MutableChunk {
-	fn clone(&self) -> Self {
-		Self {
-			leaf_nodes: self.leaf_nodes.clone(),
-			materials: self.materials.clone(),
-			interior_nodes: self.interior_nodes.clone(),
-			pending: self.pending.clone(),
 		}
 	}
 }

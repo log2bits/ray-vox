@@ -1,4 +1,6 @@
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+use bytemuck::{Pod, Zeroable};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default, Pod, Zeroable)]
 #[repr(transparent)]
 pub struct Material(u32);
 

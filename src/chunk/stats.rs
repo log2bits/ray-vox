@@ -4,7 +4,6 @@ const DEPTH: u32 = 4;
 const SIDE: u64 = 256;
 
 impl Chunk {
-	/// Count of voxels holding non-air material.
 	pub fn stored_volume(&self) -> u64 {
 		if self.is_empty() {
 			return 0;

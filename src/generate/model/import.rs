@@ -1,3 +1,182 @@
-//! Voxelize external formats (gltf, MagicaVoxel .vox, Minecraft .mca) into a
-//! Model. Each importer produces the finest-LOD chunks; the mip pyramid is
-//! built once via merge_lod and saved alongside in the .rvox.
+use super::Model;
+use crate::Chunk;
+use crate::chunk::edit::{EditPacket, Path};
+use crate::chunk::material::Material;
+use crate::chunk::sources::DiscreteSource;
+use crate::util::types::{Aabb, ChunkId, ChunkPos, LodLevel, WorldPos};
+use dot_vox::{DotVoxData, SceneNode};
+use std::collections::HashMap;
+
+#[derive(Debug)]
+pub enum ImportError {
+	BadVox(String),
+}
+
+impl std::fmt::Display for ImportError {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			ImportError::BadVox(s) => write!(f, "bad vox file: {}", s),
+		}
+	}
+}
+
+impl std::error::Error for ImportError {}
+
+impl Model {
+	pub fn import_vox(bytes: &[u8]) -> Result<Self, ImportError> {
+		let data = dot_vox::load_bytes(bytes).map_err(|e| ImportError::BadVox(e.into()))?;
+
+		let palette: Vec<Material> = data.palette.iter()
+			.map(|c| Material::from_rgb_pbr_id([c.r, c.g, c.b], 0))
+			.collect();
+
+		let mut voxel_buf: VoxelBuf = VoxelBuf::default();
+		if data.scenes.is_empty() {
+			for (i, _model) in data.models.iter().enumerate() {
+				emit_model_at_corner(&data, i as u32, [0, 0, 0], &palette, &mut voxel_buf);
+			}
+		} else {
+			walk_scene(&data, 0, [0, 0, 0], &palette, &mut voxel_buf);
+		}
+
+		if voxel_buf.entries.is_empty() {
+			return Ok(Model {
+				chunks: HashMap::new(),
+				bounds: Aabb::new(WorldPos::new(0, 0, 0), WorldPos::new(0, 0, 0)),
+			});
+		}
+		let (mut min_x, mut min_y, mut min_z) = (i32::MAX, i32::MAX, i32::MAX);
+		let (mut max_x, mut max_y, mut max_z) = (i32::MIN, i32::MIN, i32::MIN);
+		for &(p, _) in &voxel_buf.entries {
+			min_x = min_x.min(p[0]); min_y = min_y.min(p[1]); min_z = min_z.min(p[2]);
+			max_x = max_x.max(p[0] + 1); max_y = max_y.max(p[1] + 1); max_z = max_z.max(p[2] + 1);
+		}
+		let shift = [-min_x, -min_y, -min_z];
+
+		let fine = LodLevel::FINEST;
+		let chunk_size = fine.chunk_size();
+		let mut by_chunk: HashMap<ChunkId, EditPacket> = HashMap::new();
+		for &(world, material) in &voxel_buf.entries {
+			let p = [world[0] + shift[0], world[1] + shift[1], world[2] + shift[2]];
+			let chunk_origin = WorldPos::new(
+				align_down(p[0], chunk_size),
+				align_down(p[1], chunk_size),
+				align_down(p[2], chunk_size),
+			);
+			let chunk_id = ChunkId::new(chunk_origin, fine);
+			let local = ChunkPos::new(
+				(p[0] - chunk_origin.x()) as u8,
+				(p[1] - chunk_origin.y()) as u8,
+				(p[2] - chunk_origin.z()) as u8,
+			);
+			by_chunk.entry(chunk_id).or_default()
+				.push(Path::from_coords(local, 4), material);
+		}
+
+		let mut chunks: HashMap<ChunkId, Chunk> = HashMap::new();
+		for (id, mut packet) in by_chunk {
+			packet.sort();
+			let chunk = Chunk::new().edit(&DiscreteSource::new(&packet.edits));
+			if !chunk.is_empty() {
+				chunks.insert(id, chunk);
+			}
+		}
+
+		let bounds = Aabb::new(
+			WorldPos::new(0, 0, 0),
+			WorldPos::new(max_x - min_x, max_y - min_y, max_z - min_z),
+		);
+
+		let mut out = Model { chunks, bounds };
+		out.build_mip_pyramid();
+		Ok(out)
+	}
+}
+
+#[derive(Default)]
+struct VoxelBuf {
+	entries: Vec<([i32; 3], Material)>,
+}
+
+fn walk_scene(
+	data: &DotVoxData,
+	node_idx: u32,
+	offset: [i32; 3],
+	palette: &[Material],
+	buf: &mut VoxelBuf,
+) {
+	let node = match data.scenes.get(node_idx as usize) {
+		Some(n) => n,
+		None => return,
+	};
+	match node {
+		SceneNode::Transform { frames, child, .. } => {
+			let mut new_offset = offset;
+			if let Some(frame) = frames.first() {
+				if let Some(p) = frame.position() {
+					new_offset = [offset[0] + p.x, offset[1] + p.y, offset[2] + p.z];
+				}
+			}
+			walk_scene(data, *child, new_offset, palette, buf);
+		}
+		SceneNode::Group { children, .. } => {
+			for &c in children {
+				walk_scene(data, c, offset, palette, buf);
+			}
+		}
+		SceneNode::Shape { models, .. } => {
+			for sm in models {
+				emit_model(data, sm.model_id, offset, palette, buf);
+			}
+		}
+	}
+}
+
+fn emit_model(
+	data: &DotVoxData,
+	model_id: u32,
+	center: [i32; 3],
+	palette: &[Material],
+	buf: &mut VoxelBuf,
+) {
+	let model = match data.models.get(model_id as usize) {
+		Some(m) => m,
+		None => return,
+	};
+	let corner = [
+		center[0] - model.size.x as i32 / 2,
+		center[1] - model.size.y as i32 / 2,
+		center[2] - model.size.z as i32 / 2,
+	];
+	emit_model_at_corner(data, model_id, corner, palette, buf);
+}
+
+fn emit_model_at_corner(
+	data: &DotVoxData,
+	model_id: u32,
+	corner: [i32; 3],
+	palette: &[Material],
+	buf: &mut VoxelBuf,
+) {
+	let model = match data.models.get(model_id as usize) {
+		Some(m) => m,
+		None => return,
+	};
+	for v in &model.voxels {
+		let world = [
+			corner[0] + v.x as i32,
+			corner[1] + v.y as i32,
+			corner[2] + v.z as i32,
+		];
+		let m = palette.get(v.i as usize).copied().unwrap_or(Material::air());
+		if m.is_air() {
+			continue;
+		}
+		buf.entries.push((world, m));
+	}
+}
+
+#[inline]
+fn align_down(v: i32, alignment: i32) -> i32 {
+	v.div_euclid(alignment) * alignment
+}

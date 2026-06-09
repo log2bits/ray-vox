@@ -2,9 +2,6 @@ use crate::chunk::Material;
 use crate::util::types::ChunkPos;
 use radsort::sort_by_key;
 
-/// One atomic edit set. A flat list of (path, material) entries plus a sorted
-/// flag. Generators that emit in tree-walk order produce path-sorted lists for
-/// free, so the apply pass can skip re-sorting them.
 #[derive(Default, Clone)]
 pub struct EditPacket {
 	pub edits: Vec<(Path, Material)>,
@@ -16,8 +13,6 @@ impl EditPacket {
 		Self::default()
 	}
 
-	/// Wrap an already-path-sorted edit list. Caller guarantees ascending u32 path
-	/// order. Tree-walk generators produce this naturally.
 	pub fn from_sorted(edits: Vec<(Path, Material)>) -> Self {
 		Self { edits, sorted: true }
 	}
@@ -95,8 +90,6 @@ impl Path {
 		self.0 == 0
 	}
 
-	/// Inverse of from_coords. Returns the corner voxel of the cell and its depth.
-	/// At depth d the cell covers a cube of side 2^(2*(4-d)).
 	pub fn to_coords(&self) -> (ChunkPos, u8) {
 		let depth = self.depth();
 		let bytes = self.0.to_be_bytes();

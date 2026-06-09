@@ -1,4 +1,4 @@
-#[derive(PartialEq, Clone, Copy)]
+#[derive(PartialEq, Eq, Hash, Clone, Copy)]
 pub struct Pbr {
 	roughness: u8,
 	emissive: u8,

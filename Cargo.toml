@@ -9,6 +9,7 @@ path = "src/lib.rs"
 [dependencies]
 ahash = "0.8"
 anyhow = "1"
+dot_vox = "5"
 pollster = "0.3"
 bytemuck = { version = "1", features = ["derive"] }
 image = "0.25.10"

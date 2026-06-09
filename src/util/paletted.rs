@@ -38,7 +38,6 @@ impl<T: PartialEq + Eq + Hash + Copy + Into<u32>> PalettedVec<T> {
 		self.indices.clear();
 	}
 
-	/// Drop the build-time acceleration map. Call before storing long-term.
 	pub fn shrink_to_fit(&mut self) {
 		self.lut.shrink_to_fit();
 	}

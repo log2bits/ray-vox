@@ -7,6 +7,11 @@ pub const MAX_LEAF_NODES: u32 = 64 * 64 * 64 + 64 * 64 + 64 + 1;
 const _: () = assert!(MAX_INTERIOR_NODES <= 1 << 13);
 const _: () = assert!(MAX_LEAF_NODES <= 1 << 19);
 
+const _: () = assert!(std::mem::size_of::<InteriorNode>() == 24);
+const _: () = assert!(std::mem::size_of::<LeafNode>() == 12);
+const _: () = assert!(std::mem::align_of::<InteriorNode>() == 4);
+const _: () = assert!(std::mem::align_of::<LeafNode>() == 4);
+
 pub enum CellState {
 	Empty,
 	Filled,
@@ -14,8 +19,6 @@ pub enum CellState {
 	Leaf,
 }
 
-/// The two masks that determine each slot's state. Both InteriorNode and
-/// InteriorNodeWide embed this so the state and rank queries live in one place.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
 pub struct ChildMasks {
@@ -27,8 +30,8 @@ impl ChildMasks {
 	#[inline]
 	pub fn new(has_child: u64, is_leaf: u64) -> Self {
 		Self {
-			has_child: Mask64(has_child),
-			is_leaf: Mask64(is_leaf),
+			has_child: Mask64::new(has_child),
+			is_leaf: Mask64::new(is_leaf),
 		}
 	}
 
@@ -100,26 +103,14 @@ pub struct InteriorNode {
 	material_offset: u32,
 }
 
-/// Edit-time form of an interior node. Full u32 offsets instead of packed bits.
-#[derive(Copy, Clone, Default)]
-pub struct InteriorNodeWide {
-	pub masks: ChildMasks,
-	interior_offset: u32,
-	leaf_offset: u32,
-	material_offset: u32,
-}
-
-#[derive(Copy, Clone, Default)]
+#[repr(C)]
+#[derive(Copy, Clone, Default, Pod, Zeroable)]
 pub struct LeafNode {
 	pub occupancy: Mask64,
 	material_offset: u32,
 }
 
 impl InteriorNode {
-	pub fn new() -> Self {
-		Self::default()
-	}
-
 	pub fn material_offset(&self) -> u32 {
 		self.material_offset
 	}
@@ -169,53 +160,7 @@ impl InteriorNode {
 	}
 }
 
-impl InteriorNodeWide {
-	pub fn new() -> Self {
-		Self::default()
-	}
-
-	pub fn interior_offset(&self) -> u32 {
-		self.interior_offset
-	}
-
-	pub fn set_interior_offset(&mut self, offset: u32) {
-		self.interior_offset = offset;
-	}
-
-	pub fn leaf_offset(&self) -> u32 {
-		self.leaf_offset
-	}
-
-	pub fn set_leaf_offset(&mut self, offset: u32) {
-		self.leaf_offset = offset;
-	}
-
-	pub fn material_offset(&self) -> u32 {
-		self.material_offset
-	}
-
-	pub fn set_material_offset(&mut self, offset: u32) {
-		self.material_offset = offset;
-	}
-
-	pub fn interior_child_index(&self, slot: u8) -> u32 {
-		self.interior_offset + self.masks.interior_rank(slot)
-	}
-
-	pub fn leaf_child_index(&self, slot: u8) -> u32 {
-		self.leaf_offset + self.masks.leaf_rank(slot)
-	}
-
-	pub fn material_index(&self, slot: u8) -> u32 {
-		self.material_offset + self.masks.material_rank(slot)
-	}
-}
-
 impl LeafNode {
-	pub fn new() -> Self {
-		Self::default()
-	}
-
 	pub fn material_offset(&self) -> u32 {
 		self.material_offset
 	}

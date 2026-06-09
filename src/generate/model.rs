@@ -1,10 +1,66 @@
-//! Models: precomputed instanced mip pyramids of chunks.
-//!
-//! Loaded from external formats (gltf/MagicaVoxel/Minecraft) at import time,
-//! serialized to .rvox in a layout matching the GPU buffer, then stamped into
-//! the world. A clipmap chunk that aligns 1:1 with one of a model's mip chunks
-//! references it by handle (one copy in RAM and VRAM). Composite cells where
-//! the model overlaps terrain or another stamp bake a fresh chunk.
-
+pub mod coarsen;
 pub mod import;
 pub mod rvox;
+
+#[cfg(test)]
+mod tests;
+
+use crate::Chunk;
+use crate::util::types::{Aabb, ChunkId, LodLevel, WorldPos};
+use coarsen::coarsen;
+use std::collections::{HashMap, HashSet};
+
+pub struct Model {
+	pub chunks: HashMap<ChunkId, Chunk>,
+	pub bounds: Aabb,
+}
+
+impl Model {
+	pub fn empty(bounds: Aabb) -> Self {
+		Self { chunks: HashMap::new(), bounds }
+	}
+
+	pub fn chunks_at_lod(&self, lod: LodLevel) -> impl Iterator<Item = (&ChunkId, &Chunk)> {
+		self.chunks.iter().filter(move |(id, _)| id.lod == lod)
+	}
+
+	pub fn chunk_count(&self) -> usize {
+		self.chunks.len()
+	}
+
+	pub fn chunk_at(&self, lod: LodLevel, pos: WorldPos) -> Option<&Chunk> {
+		let id = pos.chunk_id(lod);
+		self.chunks.get(&id)
+	}
+
+	pub fn build_mip_pyramid(&mut self) {
+		let mut current_lod = match self.chunks.keys().map(|id| id.lod).max() {
+			Some(lod) => lod,
+			None => return,
+		};
+
+		while let Some(parent_lod) = current_lod.coarser() {
+			let mut parent_ids: HashSet<ChunkId> = HashSet::new();
+			for (id, _) in self.chunks.iter().filter(|(id, _)| id.lod == current_lod) {
+				if let Some(parent) = id.parent() {
+					parent_ids.insert(parent);
+				}
+			}
+
+			for parent_id in parent_ids {
+				let children_ids = match parent_id.children() {
+					Some(ids) => ids,
+					None => continue,
+				};
+				let children_refs: [Option<&Chunk>; 64] =
+					std::array::from_fn(|i| self.chunks.get(&children_ids[i]));
+				let parent_chunk = coarsen(&children_refs);
+				if !parent_chunk.is_empty() {
+					self.chunks.insert(parent_id, parent_chunk);
+				}
+			}
+
+			current_lod = parent_lod;
+		}
+	}
+}

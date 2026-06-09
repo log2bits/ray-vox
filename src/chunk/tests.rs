@@ -1,11 +1,7 @@
-//! Chunk edit application tests. BruteChunk is a sparse reference that applies
-//! edits the same way the engine does (single-depth batches, in order). Property
-//! tests compare BruteChunk to Chunk::voxel_at across random edits.
-
+use super::build::{build_chunk, mode_over};
 use super::edit::{EditPacket, Path};
 use super::material::Material;
-use super::merge::merge_lod;
-use super::rebuild::mode_over;
+use super::sources::{DiscreteSource, Overlay};
 use super::Chunk;
 use crate::generate::volume::sphere::Sphere;
 use crate::generate::Edit;
@@ -18,8 +14,6 @@ fn mat(v: u32) -> Material {
 	Material::from(v)
 }
 
-/// Returns the (corner, side) of the voxel cube the path covers.
-/// Depth 0 is handled by the caller since it covers the whole chunk.
 fn path_to_cube(path: Path) -> ([u8; 3], u8) {
 	let (corner, depth) = path.to_coords();
 	let side = 1u8 << (8u8.saturating_sub(2 * depth)).min(7);
@@ -28,7 +22,6 @@ fn path_to_cube(path: Path) -> ([u8; 3], u8) {
 
 #[derive(Default, Clone)]
 struct BruteChunk {
-	// Sparse storage. Absent keys take the background value.
 	voxels: HashMap<u32, Material>,
 	background: Material,
 }
@@ -37,12 +30,9 @@ fn pack(x: u8, y: u8, z: u8) -> u32 {
 	(x as u32) | ((y as u32) << 8) | ((z as u32) << 16)
 }
 
-/// Test helper: apply one packet to a chunk and bake. Tests don't need the
-/// queueing flow, so we keep this one-liner here instead of polluting Chunk's API.
-fn bake_one(chunk: Chunk, packet: EditPacket) -> Chunk {
-	let mut mc = chunk.into_mutable();
-	mc.queue_edit(packet);
-	mc.bake()
+fn bake_one(chunk: Chunk, mut packet: EditPacket) -> Chunk {
+	packet.sort();
+	chunk.edit(&DiscreteSource::new(&packet.edits))
 }
 
 impl BruteChunk {
@@ -75,7 +65,6 @@ impl BruteChunk {
 	}
 }
 
-/// Apply a packet to BruteChunk in path-sorted order, mirroring bake.
 fn brute_apply(brute: &mut BruteChunk, mut edits: EditPacket) {
 	edits.sort();
 	for &(path, m) in &edits.edits {
@@ -144,7 +133,6 @@ fn root_fill_then_carve() {
 		assert_eq!(chunk.voxel_at(p), fill);
 	}
 
-	// Carve a single voxel back to air in a separate batch.
 	let carve = ChunkPos::new(100, 100, 100);
 	let mut e2 = EditPacket::default();
 	e2.push(Path::from_coords(carve, 4), Material::air());
@@ -157,7 +145,6 @@ fn root_fill_then_carve() {
 
 #[test]
 fn depth3_cube_edit() {
-	// A depth-3 path covers a 4x4x4 voxel cube.
 	let mut edits = EditPacket::default();
 	let m = mat(0x33445540);
 	let corner = ChunkPos::new(8, 12, 16);
@@ -190,7 +177,7 @@ fn mode_over_picks_most_frequent_material() {
 	mats[2] = a;
 	mats[5] = b;
 	mats[10] = c;
-	let occ = Mask64(1 | 1 << 1 | 1 << 2 | 1 << 5 | 1 << 10);
+	let occ = Mask64::new(1 | 1 << 1 | 1 << 2 | 1 << 5 | 1 << 10);
 	assert_eq!(mode_over(occ, &mats), a);
 }
 
@@ -204,7 +191,7 @@ fn mode_over_breaks_ties_by_lowest_slot() {
 	mats[3] = b;
 	mats[5] = a;
 	mats[7] = b;
-	let occ = Mask64((1u64 << 1) | (1 << 3) | (1 << 5) | (1 << 7));
+	let occ = Mask64::new((1u64 << 1) | (1 << 3) | (1 << 5) | (1 << 7));
 	assert_eq!(mode_over(occ, &mats), a);
 
 	let mut mats = [Material::air(); 64];
@@ -217,9 +204,6 @@ fn mode_over_breaks_ties_by_lowest_slot() {
 
 #[test]
 fn dedup_handles_identical_subtrees() {
-	// Several cubes of the same material at positions with low 4 bits zero produce
-	// structurally identical depth-2 interiors, all sharing the same content hash.
-	// The verify step has to confirm equality before merging.
 	let m = mat(0x55667740);
 	let mut edits = EditPacket::default();
 	let positions = [
@@ -247,7 +231,6 @@ fn dedup_handles_identical_subtrees() {
 	assert_eq!(chunk.voxel_at(ChunkPos::new(8, 8, 8)), Material::air());
 	assert_eq!(chunk.voxel_at(ChunkPos::new(100, 100, 100)), Material::air());
 
-	// One material across all cubes, so the palette has one entry.
 	assert_eq!(chunk.materials.lut.len(), 1);
 }
 
@@ -259,9 +242,6 @@ fn uniform_chunk(m: Material) -> Chunk {
 
 #[test]
 fn deep_edit_into_demoted_leaf_region() {
-	// Packet 1 places two depth-2 fills with different materials in the same depth-1
-	// region. The depth-1 node has only Filled children, so compress demotes it to a
-	// leaf that sits as a Leaf child of the root.
 	let m1 = mat(0x11111140);
 	let m2 = mat(0x22222240);
 	let m3 = mat(0x33333340);
@@ -273,8 +253,6 @@ fn deep_edit_into_demoted_leaf_region() {
 	assert_eq!(mid.voxel_at(ChunkPos::new(0, 0, 0)), m1);
 	assert_eq!(mid.voxel_at(ChunkPos::new(16, 0, 0)), m2);
 
-	// Packet 2 edits a single voxel inside the same depth-1 region but outside both
-	// depth-2 fills. Descending into the demoted-leaf slot was a panic before the fix.
 	let target = ChunkPos::new(32, 0, 0);
 	let mut p2 = EditPacket::default();
 	p2.push(Path::from_coords(target, 4), m3);
@@ -289,8 +267,7 @@ fn deep_edit_into_demoted_leaf_region() {
 fn sphere_paints_inside_and_leaves_outside_air() {
 	let m = mat(0x778899AA);
 	let chunk_id = ChunkId::new(WorldPos::new(0, 0, 0), LodLevel::FINEST);
-	let packet = Sphere::new(WorldPos::new(128, 128, 128), 20, m).sample(chunk_id);
-	let chunk = bake_one(Chunk::new(), packet);
+	let chunk = Sphere::new(WorldPos::new(128, 128, 128), 20, m).apply(chunk_id, Chunk::new());
 
 	for (offset, expected) in [
 		([0, 0, 0], m),
@@ -316,69 +293,13 @@ fn sphere_carve_leaves_air_hole_in_filled_chunk() {
 	let solid = bake_one(Chunk::new(), fill);
 
 	let chunk_id = ChunkId::new(WorldPos::new(0, 0, 0), LodLevel::FINEST);
-	let carve = Sphere::new(WorldPos::new(128, 128, 128), 20, Material::air()).sample(chunk_id);
-	let chunk = bake_one(solid, carve);
+	let chunk = Sphere::new(WorldPos::new(128, 128, 128), 20, Material::air())
+		.apply(chunk_id, solid);
 
 	assert_eq!(chunk.voxel_at(ChunkPos::new(128, 128, 128)), Material::air());
 	assert_eq!(chunk.voxel_at(ChunkPos::new(138, 128, 128)), Material::air());
 	assert_eq!(chunk.voxel_at(ChunkPos::new(150, 128, 128)), stone);
 	assert_eq!(chunk.voxel_at(ChunkPos::new(0, 0, 0)), stone);
-}
-
-#[test]
-fn merge_all_empty_is_empty() {
-	let coarse = merge_lod([(); 64].map(|_| None));
-	assert!(coarse.is_empty());
-}
-
-#[test]
-fn merge_all_uniform_same_is_uniform() {
-	let m = mat(0x99AABB40);
-	let fine = uniform_chunk(m);
-	let arr = [Some(&fine); 64];
-	let coarse = merge_lod(arr);
-	assert!(coarse.is_uniform(), "expected uniform coarse chunk");
-	for p in sample_grid() {
-		assert_eq!(coarse.voxel_at(p), m);
-	}
-}
-
-#[test]
-fn merge_routes_content_to_correct_coarse_position() {
-	// One fine voxel at fine (0,0,0) in slot-0 of the coarse root.
-	let m = mat(0xABCDEF40);
-	let mut e = EditPacket::default();
-	e.push(Path::from_coords(ChunkPos::new(0, 0, 0), 4), m);
-	let fine = bake_one(Chunk::new(), e);
-
-	let mut children: [Option<&Chunk>; 64] = [None; 64];
-	children[0] = Some(&fine);
-	let coarse = merge_lod(children);
-
-	// The lone non-air voxel wins the mode for the coarse voxel covering fine (0..4)^3.
-	assert_eq!(coarse.voxel_at(ChunkPos::new(0, 0, 0)), m);
-	assert_eq!(coarse.voxel_at(ChunkPos::new(128, 128, 128)), Material::air());
-}
-
-#[test]
-fn merge_mixes_two_uniform_chunks_at_distinct_slots() {
-	let a = mat(0x11111140);
-	let b = mat(0x22222240);
-	let chunk_a = uniform_chunk(a);
-	let chunk_b = uniform_chunk(b);
-
-	let mut children: [Option<&Chunk>; 64] = [None; 64];
-	children[0] = Some(&chunk_a);
-	// Slot 63 = (x=3, y=3, z=3) in the slot bit-packing, covering coarse cells
-	// from (192, 192, 192) to (255, 255, 255) since each slot covers 64 coarse voxels.
-	children[63] = Some(&chunk_b);
-	let coarse = merge_lod(children);
-
-	assert_eq!(coarse.voxel_at(ChunkPos::new(0, 0, 0)), a);
-	assert_eq!(coarse.voxel_at(ChunkPos::new(63, 63, 63)), a);
-	assert_eq!(coarse.voxel_at(ChunkPos::new(64, 64, 64)), Material::air());
-	assert_eq!(coarse.voxel_at(ChunkPos::new(192, 192, 192)), b);
-	assert_eq!(coarse.voxel_at(ChunkPos::new(255, 255, 255)), b);
 }
 
 #[test]
@@ -526,5 +447,76 @@ fn property_multi_packet_mixed_depths() {
 		let mut samples = sample_grid();
 		samples.extend(touched);
 		assert_match(&chunk, &brute, &samples);
+	}
+}
+
+#[test]
+fn overlay_last_writer_wins_for_two_overlapping_spheres() {
+	let red = mat(0x11111140);
+	let blue = mat(0x22222240);
+	let chunk_id = ChunkId::new(WorldPos::new(0, 0, 0), LodLevel::FINEST);
+	let s1 = Sphere::new(WorldPos::new(100, 128, 128), 40, red).local(chunk_id).unwrap();
+	let s2 = Sphere::new(WorldPos::new(156, 128, 128), 40, blue).local(chunk_id).unwrap();
+	let chunk = build_chunk(&Overlay::new(s1, s2));
+
+	assert_eq!(chunk.voxel_at(ChunkPos::new(190, 128, 128)), blue);
+	assert_eq!(chunk.voxel_at(ChunkPos::new(70, 128, 128)), red);
+	assert_eq!(chunk.voxel_at(ChunkPos::new(128, 128, 128)), blue);
+	assert_eq!(chunk.voxel_at(ChunkPos::new(0, 0, 0)), Material::air());
+	assert_eq!(chunk.voxel_at(ChunkPos::new(255, 255, 255)), Material::air());
+}
+
+#[test]
+fn edit_sphere_over_detailed_base_preserves_untouched_voxels() {
+	let palette = [mat(0x11111140), mat(0x22222240), mat(0x33333340)];
+	let mut edits = EditPacket::default();
+	for (i, &m) in palette.iter().enumerate() {
+		for slot in 0..16usize {
+			let pos = ChunkPos::new(
+				((i * 64 + (slot & 3) * 16) % 256) as u8,
+				((slot >> 2) * 16) as u8,
+				((i * 64) % 256) as u8,
+			);
+			edits.push(Path::from_coords(pos, 3), m);
+		}
+	}
+	let base = bake_one(Chunk::new(), edits);
+
+	let outside_samples = [
+		ChunkPos::new(8, 8, 8),
+		ChunkPos::new(200, 200, 8),
+		ChunkPos::new(8, 200, 8),
+	];
+	let pre: Vec<_> = outside_samples.iter().map(|p| (*p, base.voxel_at(*p))).collect();
+
+	let chunk_id = ChunkId::new(WorldPos::new(0, 0, 0), LodLevel::FINEST);
+	let carved = Sphere::new(WorldPos::new(128, 128, 128), 30, Material::air())
+		.apply(chunk_id, base);
+
+	assert_eq!(carved.voxel_at(ChunkPos::new(128, 128, 128)), Material::air());
+	assert_eq!(carved.voxel_at(ChunkPos::new(140, 128, 128)), Material::air());
+	for (p, before) in pre {
+		assert_eq!(carved.voxel_at(p), before, "pos {:?} should be unchanged", p);
+	}
+}
+
+#[test]
+fn overlay_passthrough_reveals_base() {
+	use super::build::{Sample, Source, VoxelSample};
+
+	#[derive(Clone, Copy)]
+	struct NoOp;
+	impl Source for NoOp {
+		fn classify(&self, _: [i32; 3], _: [i32; 3], _: u8) -> Sample { Sample::Passthrough }
+		fn voxel(&self, _: [i32; 3]) -> VoxelSample { VoxelSample::Passthrough }
+	}
+
+	let fill = mat(0xAABBCC40);
+	let mut e = EditPacket::default();
+	e.push(Path::from(0u32), fill);
+	let base = bake_one(Chunk::new(), e);
+	let out = base.clone().edit(&NoOp);
+	for p in sample_grid() {
+		assert_eq!(out.voxel_at(p), fill, "passthrough should preserve base at {:?}", p);
 	}
 }

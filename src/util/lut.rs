@@ -4,10 +4,7 @@ use std::hash::Hash;
 #[derive(Default, Clone)]
 pub struct Lut<T> {
 	pub values: Vec<T>,
-	/// Most-recent (value, index) hit. Collapses long same-value run callers
-	/// (uniform fills) to a single equality check.
 	last_hit: Option<(T, u32)>,
-	/// O(1) intern map. Drop with `shrink_to_fit` for storage.
 	index: AHashMap<T, u32>,
 }
 
@@ -53,7 +50,6 @@ impl<T: PartialEq + Eq + Hash + Copy> Lut<T> {
 		self.index.clear();
 	}
 
-	/// Drop the build-time acceleration map. Call before storing long-term.
 	pub fn shrink_to_fit(&mut self) {
 		self.index = AHashMap::new();
 	}
