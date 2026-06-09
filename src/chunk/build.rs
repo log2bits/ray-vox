@@ -1,8 +1,8 @@
 use ahash::AHashMap;
 
 use super::material::Material;
-use super::node::{CellState, ChildMasks, InteriorNode, LeafNode};
-use super::Chunk;
+use super::node::{ChildMasks, InteriorNode, LeafNode};
+use super::{Child, Chunk};
 use crate::util::PalettedVec;
 use crate::util::types::Mask64;
 
@@ -37,33 +37,25 @@ struct LeafData {
 	materials: [Material; 64],
 }
 
-#[derive(Copy, Clone)]
-enum Cell {
-	Empty,
-	Filled(Material),
-	Leaf(u32),
-	Interior(u32),
-}
-
 #[derive(Default)]
 struct Arena {
 	leaves: Vec<LeafData>,
-	interiors: Vec<[Cell; 64]>,
+	interiors: Vec<[Child; 64]>,
 }
 
 impl Arena {
 	#[inline]
-	fn push_leaf(&mut self, data: LeafData) -> Cell {
+	fn push_leaf(&mut self, data: LeafData) -> Child {
 		let id = self.leaves.len() as u32;
 		self.leaves.push(data);
-		Cell::Leaf(id)
+		Child::Leaf(id)
 	}
 
 	#[inline]
-	fn push_interior(&mut self, children: [Cell; 64]) -> Cell {
+	fn push_interior(&mut self, children: [Child; 64]) -> Child {
 		let id = self.interiors.len() as u32;
 		self.interiors.push(children);
-		Cell::Interior(id)
+		Child::Interior(id)
 	}
 }
 
@@ -72,15 +64,15 @@ fn slot_xyz(slot: u8) -> (i32, i32, i32) {
 	(((slot >> 4) & 3) as i32, ((slot >> 2) & 3) as i32, (slot & 3) as i32)
 }
 
-fn classify_children(arena: &mut Arena, children: [Cell; 64]) -> Cell {
+fn classify_children(arena: &mut Arena, children: [Child; 64]) -> Child {
 	let mut nonempty = false;
 	let mut any_nested = false;
 	let mut uniform_fill: Option<Material> = None;
 	let mut all_same = true;
 	for c in &children {
 		match c {
-			Cell::Empty => {}
-			Cell::Filled(m) => {
+			Child::Empty => {}
+			Child::Filled(m) => {
 				nonempty = true;
 				match uniform_fill {
 					None => uniform_fill = Some(*m),
@@ -88,7 +80,7 @@ fn classify_children(arena: &mut Arena, children: [Cell; 64]) -> Cell {
 					_ => all_same = false,
 				}
 			}
-			Cell::Leaf(_) | Cell::Interior(_) => {
+			Child::Leaf(_) | Child::Interior(_) => {
 				nonempty = true;
 				any_nested = true;
 				all_same = false;
@@ -96,16 +88,16 @@ fn classify_children(arena: &mut Arena, children: [Cell; 64]) -> Cell {
 		}
 	}
 	if !nonempty {
-		return Cell::Empty;
+		return Child::Empty;
 	}
 	if !any_nested {
-		if all_same && uniform_fill.is_some() && children.iter().all(|c| matches!(c, Cell::Filled(_))) {
-			return Cell::Filled(uniform_fill.unwrap());
+		if all_same && uniform_fill.is_some() && children.iter().all(|c| matches!(c, Child::Filled(_))) {
+			return Child::Filled(uniform_fill.unwrap());
 		}
 		let mut occ = Mask64::EMPTY;
 		let mut mats = [Material::air(); 64];
 		for (i, c) in children.iter().enumerate() {
-			if let Cell::Filled(m) = c {
+			if let Child::Filled(m) = c {
 				occ |= Mask64::bit(i as u8);
 				mats[i] = *m;
 			}
@@ -121,18 +113,18 @@ fn build_cell<S: Source>(
 	lo: [i32; 3],
 	side: i32,
 	depth: u8,
-) -> Cell {
+) -> Child {
 	let hi = [lo[0] + side, lo[1] + side, lo[2] + side];
 	match source.classify(lo, hi, depth) {
-		Sample::Passthrough => Cell::Empty,
-		Sample::Fill(m) if m.is_air() => Cell::Empty,
-		Sample::Fill(m) => Cell::Filled(m),
+		Sample::Passthrough => Child::Empty,
+		Sample::Fill(m) if m.is_air() => Child::Empty,
+		Sample::Fill(m) => Child::Filled(m),
 		Sample::Subdivide => {
 			if depth == INTERIOR_DEPTHS {
 				build_leaf(arena, source, lo)
 			} else {
 				let child_side = side / 4;
-				let mut children: [Cell; 64] = [Cell::Empty; 64];
+				let mut children: [Child; 64] = [Child::Empty; 64];
 				for slot in 0..64u8 {
 					let (sx, sy, sz) = slot_xyz(slot);
 					let child_lo = [
@@ -149,7 +141,7 @@ fn build_cell<S: Source>(
 	}
 }
 
-fn build_leaf<S: Source>(arena: &mut Arena, source: &S, lo: [i32; 3]) -> Cell {
+fn build_leaf<S: Source>(arena: &mut Arena, source: &S, lo: [i32; 3]) -> Child {
 	let mut occ = Mask64::EMPTY;
 	let mut mats = [Material::air(); 64];
 	for x in 0..4i32 {
@@ -168,12 +160,12 @@ fn build_leaf<S: Source>(arena: &mut Arena, source: &S, lo: [i32; 3]) -> Cell {
 		}
 	}
 	if occ.is_empty() {
-		return Cell::Empty;
+		return Child::Empty;
 	}
 	if occ == Mask64::FULL {
 		let first = mats[0];
 		if mats.iter().all(|&m| m == first) {
-			return Cell::Filled(first);
+			return Child::Filled(first);
 		}
 	}
 	arena.push_leaf(LeafData { occupancy: occ, materials: mats })
@@ -183,7 +175,7 @@ pub fn mode_over(occupancy: Mask64, mats: &[Material; 64]) -> Material {
 	let mut keys = [Material::air(); 64];
 	let mut counts = [0u32; 64];
 	let mut n = 0usize;
-	let mut best = (Material::air(), 0u32);
+	let mut best = (Material::air(), 64 - occupancy.count());
 	for slot in occupancy.iter_slots() {
 		let m = mats[slot as usize];
 		let j = match keys[..n].iter().position(|&k| k == m) {
@@ -253,15 +245,6 @@ impl Serializer {
 			.all(|(i, &m)| self.out_materials.get(offset + i as u32) == m)
 	}
 
-	fn leaf_representative(&self, canonical_idx: u32) -> Material {
-		let leaf = self.canonical_leaves[canonical_idx as usize];
-		let mut mats = [Material::air(); 64];
-		for slot in leaf.occupancy.iter_slots() {
-			mats[slot as usize] = self.out_materials.get(leaf.material_index(slot));
-		}
-		mode_over(leaf.occupancy, &mats)
-	}
-
 	fn intern_leaf(&mut self, leaf: &LeafData) -> u32 {
 		let mut hash = fnv_start();
 		hash = fnv_mix(hash, fold_mask(leaf.occupancy));
@@ -293,31 +276,25 @@ impl Serializer {
 		new_idx
 	}
 
-	fn lower(&mut self, arena: &Arena, cell: Cell) -> (Cell, Material) {
+	fn lower(&mut self, arena: &Arena, cell: Child) -> (Child, Material) {
 		match cell {
-			Cell::Empty => (Cell::Empty, Material::air()),
-			Cell::Filled(m) => (Cell::Filled(m), m),
-			Cell::Leaf(id) => {
-				let leaf = arena.leaves[id as usize].clone();
-				let canonical = self.intern_leaf(&leaf);
-				(Cell::Leaf(canonical), self.leaf_representative(canonical))
+			Child::Empty => (Child::Empty, Material::air()),
+			Child::Filled(m) => (Child::Filled(m), m),
+			Child::Leaf(id) => {
+				let leaf = &arena.leaves[id as usize];
+				let canonical = self.intern_leaf(leaf);
+				(Child::Leaf(canonical), mode_over(leaf.occupancy, &leaf.materials))
 			}
-			Cell::Interior(id) => {
+			Child::Interior(id) => {
 				let children = arena.interiors[id as usize];
-				let mut lowered: [Cell; 64] = [Cell::Empty; 64];
+				let mut lowered: [Child; 64] = [Child::Empty; 64];
 				let mut lods = [Material::air(); 64];
 				let mut masks = ChildMasks::default();
 				for slot in 0..64u8 {
 					let (c, lod) = self.lower(arena, children[slot as usize]);
 					lowered[slot as usize] = c;
 					lods[slot as usize] = lod;
-					let state = match c {
-						Cell::Empty => CellState::Empty,
-						Cell::Filled(_) => CellState::Filled,
-						Cell::Interior(_) => CellState::Interior,
-						Cell::Leaf(_) => CellState::Leaf,
-					};
-					masks.set_state(slot, state);
+					masks.set_state(slot, c.state());
 				}
 
 				let mut hash = fnv_start();
@@ -326,27 +303,27 @@ impl Serializer {
 				for slot in masks.occupancy().iter_slots() {
 					hash = fnv_mix(hash, lods[slot as usize].into());
 					let canon = match lowered[slot as usize] {
-						Cell::Interior(c) | Cell::Leaf(c) => c,
+						Child::Interior(c) | Child::Leaf(c) => c,
 						_ => 0,
 					};
 					hash = fnv_mix(hash, canon);
 				}
 				if let Some(&cand) = self.int_sig.get(&hash) {
 					if self.interior_eq(cand, masks, &lods, &lowered) {
-						return (Cell::Interior(cand), mode_over(masks.occupancy(), &lods));
+						return (Child::Interior(cand), mode_over(masks.occupancy(), &lods));
 					}
 				}
 
 				let interior_ptr = self.out_interiors.len() as u32;
 				let leaf_ptr = self.out_leaves.len() as u32;
 				for slot in masks.interiors().iter_slots() {
-					if let Cell::Interior(c) = lowered[slot as usize] {
+					if let Child::Interior(c) = lowered[slot as usize] {
 						let n = self.canonical_interiors[c as usize];
 						self.out_interiors.push(n);
 					}
 				}
 				for slot in masks.leaves().iter_slots() {
-					if let Cell::Leaf(c) = lowered[slot as usize] {
+					if let Child::Leaf(c) = lowered[slot as usize] {
 						let n = self.canonical_leaves[c as usize];
 						self.out_leaves.push(n);
 					}
@@ -366,7 +343,7 @@ impl Serializer {
 				let new_idx = self.canonical_interiors.len() as u32;
 				self.canonical_interiors.push(out);
 				self.int_sig.entry(hash).or_insert(new_idx);
-				(Cell::Interior(new_idx), mode_over(masks.occupancy(), &lods))
+				(Child::Interior(new_idx), mode_over(masks.occupancy(), &lods))
 			}
 		}
 	}
@@ -376,7 +353,7 @@ impl Serializer {
 		cand: u32,
 		masks: ChildMasks,
 		lods: &[Material; 64],
-		lowered: &[Cell; 64],
+		lowered: &[Child; 64],
 	) -> bool {
 		let c = self.canonical_interiors[cand as usize];
 		if c.masks.has_child != masks.has_child || c.masks.is_leaf != masks.is_leaf {
@@ -391,7 +368,7 @@ impl Serializer {
 		let int_base = c.interior_offset();
 		for slot in masks.interiors().iter_slots() {
 			let want = match lowered[slot as usize] {
-				Cell::Interior(want) => want,
+				Child::Interior(want) => want,
 				_ => return false,
 			};
 			let got = &self.out_interiors[(int_base + interior_rank) as usize];
@@ -410,7 +387,7 @@ impl Serializer {
 		let leaf_base = c.leaf_offset();
 		for slot in masks.leaves().iter_slots() {
 			let want = match lowered[slot as usize] {
-				Cell::Leaf(want) => want,
+				Child::Leaf(want) => want,
 				_ => return false,
 			};
 			let got = &self.out_leaves[(leaf_base + leaf_rank) as usize];
@@ -432,8 +409,8 @@ pub fn build_chunk<S: Source>(source: &S) -> Chunk {
 
 	let mut ser = Serializer::new();
 	match root {
-		Cell::Empty => return Chunk::new(),
-		Cell::Filled(m) => {
+		Child::Empty => return Chunk::new(),
+		Child::Filled(m) => {
 			ser.out_materials.push(m);
 			let mut materials = ser.out_materials;
 			materials.shrink_to_fit();
@@ -456,11 +433,11 @@ pub fn build_chunk<S: Source>(source: &S) -> Chunk {
 	}
 
 	match root_cell {
-		Cell::Interior(c) => {
+		Child::Interior(c) => {
 			let n = ser.canonical_interiors[c as usize];
 			ser.out_interiors.push(n);
 		}
-		Cell::Leaf(c) => {
+		Child::Leaf(c) => {
 			let n = ser.canonical_leaves[c as usize];
 			ser.out_leaves.push(n);
 		}

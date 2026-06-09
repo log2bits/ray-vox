@@ -17,11 +17,23 @@ use material::Material;
 use node::{CellState, InteriorNode, LeafNode};
 use sources::{ChunkSource, Overlay};
 
+#[derive(Copy, Clone)]
 pub enum Child {
 	Empty,
 	Filled(Material),
 	Interior(u32),
 	Leaf(u32),
+}
+
+impl Child {
+	pub fn state(self) -> CellState {
+		match self {
+			Child::Empty => CellState::Empty,
+			Child::Filled(_) => CellState::Filled,
+			Child::Interior(_) => CellState::Interior,
+			Child::Leaf(_) => CellState::Leaf,
+		}
+	}
 }
 
 pub struct Chunk {

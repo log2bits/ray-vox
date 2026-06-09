@@ -2,6 +2,7 @@ use super::Model;
 use crate::chunk::Chunk;
 use crate::chunk::build::{Sample, Source, VoxelSample};
 use crate::chunk::material::Material;
+use crate::chunk::node::pack_slot;
 use crate::chunk::sources::LocalEdit;
 use crate::generate::Edit;
 use crate::util::types::{Aabb, ChunkId, ChunkPos, LodLevel, WorldPos};
@@ -158,9 +159,7 @@ impl<'a> ModelStampSource<'a> {
 
 	#[inline]
 	fn read_cached(&self, cache: &LeafCache, model_voxel: [i32; 3]) -> Option<Material> {
-		let slot = (((model_voxel[0] & 3) << 4)
-			| ((model_voxel[1] & 3) << 2)
-			| (model_voxel[2] & 3)) as u8;
+		let slot = pack_slot(model_voxel);
 		if cache.occupancy.contains(slot) {
 			Some(cache.materials[slot as usize])
 		} else {
@@ -209,11 +208,6 @@ fn fits_in_child(lo: [i32; 3], side: i32, current_lo: [i32; 3], child_side: i32)
 	Some(s)
 }
 
-#[inline]
-fn encode_slot(s: [i32; 3]) -> u8 {
-	(((s[0] as u8) & 3) << 4) | (((s[1] as u8) & 3) << 2) | ((s[2] as u8) & 3)
-}
-
 /// Classify a `[query_lo, query_lo + query_side)` region against a model chunk's tree.
 /// Returns Passthrough/Fill if the region is uniformly empty/filled, else Subdivide.
 fn classify_in_chunk(chunk: &Chunk, query_lo: [i32; 3], query_side: i32) -> Sample {
@@ -235,7 +229,7 @@ fn classify_in_chunk(chunk: &Chunk, query_lo: [i32; 3], query_side: i32) -> Samp
 			Some(s) => s,
 			None => return Sample::Subdivide,
 		};
-		let slot = encode_slot(s);
+		let slot = pack_slot(s);
 		if !leaf.occupancy.contains(slot) {
 			return Sample::Passthrough;
 		}
@@ -249,7 +243,7 @@ fn classify_in_chunk(chunk: &Chunk, query_lo: [i32; 3], query_side: i32) -> Samp
 			Some(s) => s,
 			None => return Sample::Subdivide,
 		};
-		let slot = encode_slot(s);
+		let slot = pack_slot(s);
 		match chunk.child(idx, slot) {
 			Child::Empty => return Sample::Passthrough,
 			Child::Filled(m) => return Sample::Fill(m),
@@ -280,7 +274,7 @@ fn classify_in_chunk(chunk: &Chunk, query_lo: [i32; 3], query_side: i32) -> Samp
 					Some(s) => s,
 					None => return Sample::Subdivide,
 				};
-				let inner_slot = encode_slot(inner);
+				let inner_slot = pack_slot(inner);
 				if !leaf.occupancy.contains(inner_slot) {
 					return Sample::Passthrough;
 				}
@@ -410,19 +404,4 @@ impl<'a> Source for ModelStampSource<'a> {
 	}
 }
 
-impl<'a> LocalEdit for ModelStampSource<'a> {
-	#[inline]
-	fn bounds_local(&self) -> [[i32; 3]; 2] {
-		[self.bounds_lo, self.bounds_hi]
-	}
-
-	#[inline]
-	fn classify(&self, lo: [i32; 3], hi: [i32; 3], depth: u8) -> Sample {
-		<Self as Source>::classify(self, lo, hi, depth)
-	}
-
-	#[inline]
-	fn voxel(&self, v: [i32; 3]) -> VoxelSample {
-		<Self as Source>::voxel(self, v)
-	}
-}
+crate::impl_local_edit!(ModelStampSource<'a>, |s| [s.bounds_lo, s.bounds_hi]);

@@ -37,11 +37,8 @@ impl Sphere {
 
 impl Edit for Sphere {
 	fn bounds(&self) -> Aabb {
-		let r = self.radius;
-		Aabb::new(
-			WorldPos::new(self.center.x() - r, self.center.y() - r, self.center.z() - r),
-			WorldPos::new(self.center.x() + r, self.center.y() + r, self.center.z() + r),
-		)
+		let r = WorldPos::splat(self.radius);
+		Aabb::new(self.center - r, self.center + r)
 	}
 
 	fn make_local<'a>(&'a self, chunk_id: ChunkId) -> Option<Box<dyn LocalEdit + 'a>> {
@@ -65,28 +62,6 @@ pub struct LocalSphere {
 
 impl LocalSphere {
 	#[inline]
-	fn box_coverage(&self, lo: [i32; 3], hi: [i32; 3]) -> SphereCoverage {
-		let mut nearest_squared = 0;
-		let mut farthest_squared = 0;
-		for axis in 0..3 {
-			let c = self.center[axis];
-			let nearest = c.clamp(lo[axis], hi[axis]) - c;
-			nearest_squared += nearest * nearest;
-			let to_lo = lo[axis] - c;
-			let to_hi = hi[axis] - c;
-			let farthest = if to_lo * to_lo > to_hi * to_hi { to_lo } else { to_hi };
-			farthest_squared += farthest * farthest;
-		}
-		if nearest_squared > self.radius_squared {
-			SphereCoverage::Outside
-		} else if farthest_squared <= self.radius_squared {
-			SphereCoverage::Inside
-		} else {
-			SphereCoverage::Straddle
-		}
-	}
-
-	#[inline]
 	fn contains(&self, voxel: [i32; 3]) -> bool {
 		let dx = voxel[0] - self.center[0];
 		let dy = voxel[1] - self.center[1];
@@ -95,15 +70,26 @@ impl LocalSphere {
 	}
 }
 
-enum SphereCoverage { Outside, Inside, Straddle }
-
 impl Source for LocalSphere {
 	#[inline]
 	fn classify(&self, lo: [i32; 3], hi: [i32; 3], _depth: u8) -> Sample {
-		match self.box_coverage(lo, hi) {
-			SphereCoverage::Outside => Sample::Passthrough,
-			SphereCoverage::Inside => Sample::Fill(self.material),
-			SphereCoverage::Straddle => Sample::Subdivide,
+		let mut nearest_sq = 0;
+		let mut farthest_sq = 0;
+		for axis in 0..3 {
+			let c = self.center[axis];
+			let nearest = c.clamp(lo[axis], hi[axis]) - c;
+			nearest_sq += nearest * nearest;
+			let to_lo = lo[axis] - c;
+			let to_hi = hi[axis] - c;
+			let farthest = if to_lo * to_lo > to_hi * to_hi { to_lo } else { to_hi };
+			farthest_sq += farthest * farthest;
+		}
+		if nearest_sq > self.radius_squared {
+			Sample::Passthrough
+		} else if farthest_sq <= self.radius_squared {
+			Sample::Fill(self.material)
+		} else {
+			Sample::Subdivide
 		}
 	}
 
@@ -117,23 +103,10 @@ impl Source for LocalSphere {
 	}
 }
 
-impl LocalEdit for LocalSphere {
-	#[inline]
-	fn bounds_local(&self) -> [[i32; 3]; 2] {
-		let r = (self.radius_squared as f32).sqrt() as i32 + 1;
-		[
-			[self.center[0] - r, self.center[1] - r, self.center[2] - r],
-			[self.center[0] + r + 1, self.center[1] + r + 1, self.center[2] + r + 1],
-		]
-	}
-
-	#[inline]
-	fn classify(&self, lo: [i32; 3], hi: [i32; 3], depth: u8) -> Sample {
-		<Self as Source>::classify(self, lo, hi, depth)
-	}
-
-	#[inline]
-	fn voxel(&self, v: [i32; 3]) -> VoxelSample {
-		<Self as Source>::voxel(self, v)
-	}
-}
+crate::impl_local_edit!(LocalSphere, |s| {
+	let r = (s.radius_squared as f32).sqrt() as i32 + 1;
+	[
+		[s.center[0] - r, s.center[1] - r, s.center[2] - r],
+		[s.center[0] + r + 1, s.center[1] + r + 1, s.center[2] + r + 1],
+	]
+});

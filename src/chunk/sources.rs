@@ -1,6 +1,7 @@
 use super::build::{Sample, Source, VoxelSample};
 use super::edit::Path;
 use super::material::Material;
+use super::node::pack_slot;
 use super::{Child, Chunk};
 use crate::util::types::ChunkPos;
 
@@ -8,6 +9,34 @@ pub trait LocalEdit: Send {
 	fn bounds_local(&self) -> [[i32; 3]; 2];
 	fn classify(&self, lo: [i32; 3], hi: [i32; 3], depth: u8) -> Sample;
 	fn voxel(&self, v: [i32; 3]) -> VoxelSample;
+}
+
+/// Implement `LocalEdit` for a `Source` by delegating `classify`/`voxel` to the
+/// `Source` impl. Caller supplies the `bounds_local` body.
+///
+/// Used because `Source` requires `Sized + Clone` (so it can't be dyn-safe),
+/// while `LocalEdit` is the dyn-safe form `CompositeSource` stores.
+#[macro_export]
+macro_rules! impl_local_edit {
+	($ty:ty, |$self_:ident| $bounds:expr $(,)?) => {
+		impl<'a> $crate::chunk::sources::LocalEdit for $ty {
+			#[inline]
+			fn bounds_local(&self) -> [[i32; 3]; 2] {
+				let $self_ = self;
+				$bounds
+			}
+			#[inline]
+			fn classify(&self, lo: [i32; 3], hi: [i32; 3], depth: u8)
+				-> $crate::chunk::build::Sample
+			{
+				<Self as $crate::chunk::build::Source>::classify(self, lo, hi, depth)
+			}
+			#[inline]
+			fn voxel(&self, v: [i32; 3]) -> $crate::chunk::build::VoxelSample {
+				<Self as $crate::chunk::build::Source>::voxel(self, v)
+			}
+		}
+	};
 }
 
 pub struct CompositeSource<'a> {
@@ -113,27 +142,19 @@ fn point_in_box(p: [i32; 3], lo: [i32; 3], hi: [i32; 3]) -> bool {
 #[derive(Clone, Copy)]
 pub struct ChunkSource<'a> {
 	chunk: &'a Chunk,
-	state: ChunkCursor,
-}
-
-#[derive(Clone, Copy)]
-enum ChunkCursor {
-	Empty,
-	Filled(Material),
-	Interior(u32),
-	Leaf(u32),
+	state: Child,
 }
 
 impl<'a> ChunkSource<'a> {
 	pub fn new(chunk: &'a Chunk) -> Self {
 		let state = if chunk.is_empty() {
-			ChunkCursor::Empty
+			Child::Empty
 		} else if chunk.is_uniform() {
-			ChunkCursor::Filled(chunk.materials.get(0))
+			Child::Filled(chunk.materials.get(0))
 		} else if chunk.interior_nodes.is_empty() {
-			ChunkCursor::Leaf(0)
+			Child::Leaf(0)
 		} else {
-			ChunkCursor::Interior(chunk.root_idx())
+			Child::Interior(chunk.root_idx())
 		};
 		Self { chunk, state }
 	}
@@ -143,58 +164,47 @@ impl Source for ChunkSource<'_> {
 	#[inline]
 	fn classify(&self, _lo: [i32; 3], _hi: [i32; 3], _depth: u8) -> Sample {
 		match self.state {
-			ChunkCursor::Empty => Sample::Passthrough,
-			ChunkCursor::Filled(m) => Sample::Fill(m),
-			ChunkCursor::Interior(_) | ChunkCursor::Leaf(_) => Sample::Subdivide,
+			Child::Empty => Sample::Passthrough,
+			Child::Filled(m) => Sample::Fill(m),
+			Child::Interior(_) | Child::Leaf(_) => Sample::Subdivide,
 		}
 	}
 
 	#[inline]
 	fn voxel(&self, v: [i32; 3]) -> VoxelSample {
 		match self.state {
-			ChunkCursor::Empty => VoxelSample::Passthrough,
-			ChunkCursor::Filled(m) => VoxelSample::Set(m),
-			ChunkCursor::Leaf(idx) => {
+			Child::Empty => VoxelSample::Passthrough,
+			Child::Filled(m) => VoxelSample::Set(m),
+			Child::Leaf(idx) => {
 				let leaf = &self.chunk.leaf_nodes[idx as usize];
-				let slot = leaf_slot(v);
+				let slot = pack_slot(v);
 				if leaf.occupancy.contains(slot) {
 					VoxelSample::Set(self.chunk.materials.get(leaf.material_index(slot)))
 				} else {
 					VoxelSample::Passthrough
 				}
 			}
-			ChunkCursor::Interior(_) => unreachable!("interior node reached at voxel level"),
+			Child::Interior(_) => unreachable!("interior node reached at voxel level"),
 		}
 	}
 
 	#[inline]
 	fn descend(&self, slot: u8) -> Self {
 		let state = match self.state {
-			ChunkCursor::Empty => ChunkCursor::Empty,
-			ChunkCursor::Filled(m) => ChunkCursor::Filled(m),
-			ChunkCursor::Interior(idx) => match self.chunk.child(idx, slot) {
-				Child::Empty => ChunkCursor::Empty,
-				Child::Filled(m) => ChunkCursor::Filled(m),
-				Child::Interior(c) => ChunkCursor::Interior(c),
-				Child::Leaf(c) => ChunkCursor::Leaf(c),
-			},
-			ChunkCursor::Leaf(leaf_idx) => {
+			Child::Empty => Child::Empty,
+			Child::Filled(m) => Child::Filled(m),
+			Child::Interior(idx) => self.chunk.child(idx, slot),
+			Child::Leaf(leaf_idx) => {
 				let leaf = &self.chunk.leaf_nodes[leaf_idx as usize];
 				if leaf.occupancy.contains(slot) {
-					ChunkCursor::Filled(self.chunk.materials.get(leaf.material_index(slot)))
+					Child::Filled(self.chunk.materials.get(leaf.material_index(slot)))
 				} else {
-					ChunkCursor::Empty
+					Child::Empty
 				}
 			}
 		};
 		Self { chunk: self.chunk, state }
 	}
-}
-
-#[inline]
-fn leaf_slot(v: [i32; 3]) -> u8 {
-	let [x, y, z] = v;
-	(((x & 3) << 4) | ((y & 3) << 2) | (z & 3)) as u8
 }
 
 #[derive(Clone, Copy)]

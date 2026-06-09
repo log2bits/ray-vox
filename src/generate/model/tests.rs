@@ -41,14 +41,18 @@ fn coarsen_all_uniform_same_material_gives_uniform() {
 }
 
 #[test]
-fn coarsen_single_fine_voxel_routes_to_correct_coarse_voxel() {
+fn coarsen_single_fine_voxel_coarsens_to_air() {
+	// Under the "majority-or-air" LOD rule, one occupied voxel out of 64 fine voxels
+	// per coarse cell loses to air at the first mode_over step, then every coarser
+	// level sees 1 non-air slot out of 64 and also picks air. Sparse content is
+	// expected to disappear in the coarse representation.
 	let m = mat(0xABCDEF40);
 	let fine = one_voxel_chunk(ChunkPos::new(0, 0, 0), m);
 	let mut children: [Option<&Chunk>; 64] = [None; 64];
 	children[0] = Some(&fine);
 	let coarse = coarsen(&children);
 
-	assert_eq!(coarse.voxel_at(ChunkPos::new(0, 0, 0)), m);
+	assert_eq!(coarse.voxel_at(ChunkPos::new(0, 0, 0)), Material::air());
 	assert_eq!(coarse.voxel_at(ChunkPos::new(1, 0, 0)), Material::air());
 }
 

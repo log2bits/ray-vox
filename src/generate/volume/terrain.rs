@@ -49,10 +49,7 @@ impl Terrain {
 
 impl Edit for Terrain {
 	fn bounds(&self) -> Aabb {
-		Aabb::new(
-			WorldPos::new(i32::MIN, i32::MIN, i32::MIN),
-			WorldPos::new(i32::MAX, i32::MAX, i32::MAX),
-		)
+		Aabb::all()
 	}
 
 	fn make_local<'a>(&'a self, chunk_id: ChunkId) -> Option<Box<dyn LocalEdit + 'a>> {
@@ -149,22 +146,9 @@ impl Source for LocalTerrain {
 	}
 }
 
-impl LocalEdit for LocalTerrain {
-	#[inline]
-	fn bounds_local(&self) -> [[i32; 3]; 2] {
-		[[i32::MIN / 2; 3], [i32::MAX / 2; 3]]
-	}
-
-	#[inline]
-	fn classify(&self, lo: [i32; 3], hi: [i32; 3], depth: u8) -> Sample {
-		<Self as Source>::classify(self, lo, hi, depth)
-	}
-
-	#[inline]
-	fn voxel(&self, v: [i32; 3]) -> VoxelSample {
-		<Self as Source>::voxel(self, v)
-	}
-}
+crate::impl_local_edit!(LocalTerrain, |_s| {
+	[[i32::MIN / 2; 3], [i32::MAX / 2; 3]]
+});
 
 #[inline]
 fn value_noise(seed: u32, wx: i32, wz: i32, period: i32) -> f32 {

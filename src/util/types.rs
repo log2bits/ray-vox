@@ -468,6 +468,10 @@ impl Aabb {
 		Self { min, max }
 	}
 
+	pub fn all() -> Self {
+		Self::new(WorldPos::splat(i32::MIN), WorldPos::splat(i32::MAX))
+	}
+
 	pub fn from_chunk(id: ChunkId) -> Self {
 		id.aabb()
 	}

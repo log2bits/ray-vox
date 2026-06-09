@@ -1,6 +1,6 @@
 use crate::chunk::build::{Sample, Source, VoxelSample, build_chunk};
 use crate::chunk::material::Material;
-use crate::chunk::node::CellState;
+use crate::chunk::node::{CellState, pack_slot};
 use crate::chunk::{Child, Chunk};
 
 pub fn coarsen(finer: &[Option<&Chunk>; 64]) -> Chunk {
@@ -70,9 +70,7 @@ impl<'a> Source for CoarsenSource<'a> {
 	}
 
 	fn voxel(&self, v: [i32; 3]) -> VoxelSample {
-		let slot = (((v[0] & 3) as u8) << 4)
-			| (((v[1] & 3) as u8) << 2)
-			| ((v[2] & 3) as u8);
+		let slot = pack_slot(v);
 		match self.cursor {
 			Cursor::Root => unreachable!("coarsen root reached voxel level"),
 			Cursor::Empty => VoxelSample::Passthrough,

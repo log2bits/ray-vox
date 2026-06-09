@@ -19,6 +19,12 @@ pub enum CellState {
 	Leaf,
 }
 
+/// Pack the low 2 bits of x,y,z into the 6-bit slot index used by 64-tree nodes.
+#[inline]
+pub fn pack_slot(v: [i32; 3]) -> u8 {
+	(((v[0] & 3) << 4) | ((v[1] & 3) << 2) | (v[2] & 3)) as u8
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
 pub struct ChildMasks {

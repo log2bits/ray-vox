@@ -166,40 +166,54 @@ fn depth3_cube_edit() {
 }
 
 #[test]
-fn mode_over_picks_most_frequent_material() {
+fn mode_over_picks_most_frequent_material_when_majority_occupied() {
 	let a = mat(0x11111140);
 	let b = mat(0x22222240);
 	let c = mat(0x33333340);
+
+	let mut mats = [Material::air(); 64];
+	let mut occ_bits = 0u64;
+	for i in 0..50 {
+		mats[i] = a;
+		occ_bits |= 1u64 << i;
+	}
+	for i in 50..58 {
+		mats[i] = b;
+		occ_bits |= 1u64 << i;
+	}
+	for i in 58..62 {
+		mats[i] = c;
+		occ_bits |= 1u64 << i;
+	}
+	assert_eq!(mode_over(Mask64::new(occ_bits), &mats), a);
+}
+
+#[test]
+fn mode_over_returns_air_when_majority_unoccupied() {
+	let a = mat(0x11111140);
+	let b = mat(0x22222240);
 
 	let mut mats = [Material::air(); 64];
 	mats[0] = a;
 	mats[1] = a;
 	mats[2] = a;
 	mats[5] = b;
-	mats[10] = c;
+	mats[10] = b;
 	let occ = Mask64::new(1 | 1 << 1 | 1 << 2 | 1 << 5 | 1 << 10);
-	assert_eq!(mode_over(occ, &mats), a);
+	assert_eq!(mode_over(occ, &mats), Material::air());
 }
 
 #[test]
-fn mode_over_breaks_ties_by_lowest_slot() {
+fn mode_over_breaks_ties_with_air_by_returning_air() {
 	let a = mat(0xAAAAAA40);
-	let b = mat(0xBBBBBB40);
 
 	let mut mats = [Material::air(); 64];
-	mats[1] = a;
-	mats[3] = b;
-	mats[5] = a;
-	mats[7] = b;
-	let occ = Mask64::new((1u64 << 1) | (1 << 3) | (1 << 5) | (1 << 7));
-	assert_eq!(mode_over(occ, &mats), a);
-
-	let mut mats = [Material::air(); 64];
-	mats[1] = b;
-	mats[3] = a;
-	mats[5] = b;
-	mats[7] = a;
-	assert_eq!(mode_over(occ, &mats), b);
+	let mut occ_bits = 0u64;
+	for i in 0..32 {
+		mats[i] = a;
+		occ_bits |= 1u64 << i;
+	}
+	assert_eq!(mode_over(Mask64::new(occ_bits), &mats), Material::air());
 }
 
 #[test]
@@ -231,7 +245,9 @@ fn dedup_handles_identical_subtrees() {
 	assert_eq!(chunk.voxel_at(ChunkPos::new(8, 8, 8)), Material::air());
 	assert_eq!(chunk.voxel_at(ChunkPos::new(100, 100, 100)), Material::air());
 
-	assert_eq!(chunk.materials.lut.len(), 1);
+	// Material LUT: air for the chunk LOD plus `m` for the cubes. Without run-dedup,
+	// each of the four identical leaves would have its own material run.
+	assert_eq!(chunk.materials.lut.len(), 2);
 }
 
 fn uniform_chunk(m: Material) -> Chunk {
@@ -315,20 +331,20 @@ fn chunk_lod_at_materials_zero_invariant() {
 	assert_eq!(u.materials.get(0), m);
 	assert!(u.interior_nodes.is_empty() && u.leaf_nodes.is_empty());
 
+	// Sparse content (one 4x4x4 cube out of 64^3 voxels) coarsens to air at the chunk LOD,
+	// but the materials[0] = chunk_lod() invariant still holds.
 	let mut e = EditPacket::default();
 	e.push(Path::from_coords(ChunkPos::new(0, 0, 0), 3), m);
 	let c = bake_one(Chunk::new(), e);
 	assert!(!c.interior_nodes.is_empty() || !c.leaf_nodes.is_empty());
-	assert_eq!(c.chunk_lod(), m);
-	assert_eq!(c.materials.get(0), m);
+	assert_eq!(c.chunk_lod(), Material::air());
+	assert_eq!(c.materials.get(0), Material::air());
 
+	// When >32/64 children at every level carry material `a`, it wins the mode and
+	// propagates up to the chunk LOD.
 	let a = mat(0x11111140);
-	let b = mat(0x22222240);
 	let mut e = EditPacket::default();
-	e.push(Path::from_coords(ChunkPos::new(0, 0, 0), 3), a);
-	e.push(Path::from_coords(ChunkPos::new(0, 0, 16), 3), a);
-	e.push(Path::from_coords(ChunkPos::new(0, 16, 0), 3), a);
-	e.push(Path::from_coords(ChunkPos::new(0, 0, 32), 3), b);
+	e.push(Path::from(0u32), a);
 	let c = bake_one(Chunk::new(), e);
 	assert_eq!(c.chunk_lod(), a);
 }

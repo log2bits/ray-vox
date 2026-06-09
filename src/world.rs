@@ -52,12 +52,6 @@ struct BakeJob {
 	edit_refs: Vec<Arc<dyn Edit>>,
 }
 
-struct RebakeJob {
-	handle: ChunkHandle,
-	chunk_id: ChunkId,
-	edit_refs: Vec<Arc<dyn Edit>>,
-}
-
 pub struct World {
 	pub edits: Vec<Arc<dyn Edit>>,
 	pub by_handle: HashMap<ChunkHandle, Vec<u32>>,
@@ -136,39 +130,32 @@ impl World {
 		let remaining = budget - add_jobs.len();
 		let rebake_jobs = self.collect_rebake_jobs(remaining);
 
-		let add_results: Vec<(BakeJob, Chunk)> = add_jobs.into_par_iter()
+		let jobs: Vec<BakeJob> = add_jobs.into_iter().chain(rebake_jobs).collect();
+		let results: Vec<(BakeJob, Chunk)> = jobs.into_par_iter()
 			.map(|job| {
 				let chunk = bake_pure(job.chunk_id, &job.edit_refs);
 				(job, chunk)
 			})
 			.collect();
 
-		let rebake_results: Vec<(ChunkHandle, Chunk)> = rebake_jobs.into_par_iter()
-			.map(|job| (job.handle, bake_pure(job.chunk_id, &job.edit_refs)))
-			.collect();
-
-		for (job, chunk) in add_results {
+		for (job, chunk) in results {
+			self.needs_rebake.remove(&job.handle);
+			let already_resident = self.clipmap.chunk_id_of(job.handle) == Some(job.chunk_id);
 			if chunk.is_empty() {
+				if already_resident {
+					self.clipmap.evict(job.handle);
+					self.chunk_pool.remove(job.handle);
+					self.by_handle.remove(&job.handle);
+				}
 				continue;
 			}
-			if self.clipmap.chunk_id_of(job.handle).is_some() {
+			if !already_resident && self.clipmap.chunk_id_of(job.handle).is_some() {
 				self.clipmap.evict(job.handle);
 				self.chunk_pool.remove(job.handle);
 			}
 			self.clipmap.assign(job.handle, job.chunk_id);
 			self.by_handle.insert(job.handle, job.edit_ids);
 			self.chunk_pool.insert(job.handle, chunk);
-		}
-
-		for (handle, chunk) in rebake_results {
-			self.needs_rebake.remove(&handle);
-			if chunk.is_empty() {
-				self.clipmap.evict(handle);
-				self.chunk_pool.remove(handle);
-				self.by_handle.remove(&handle);
-				continue;
-			}
-			self.chunk_pool.insert(handle, chunk);
 		}
 	}
 
@@ -209,13 +196,14 @@ impl World {
 		jobs
 	}
 
-	fn collect_rebake_jobs(&self, budget: usize) -> Vec<RebakeJob> {
+	fn collect_rebake_jobs(&self, budget: usize) -> Vec<BakeJob> {
 		self.needs_rebake.iter().take(budget).filter_map(|&handle| {
 			let chunk_id = self.clipmap.chunk_id_of(handle)?;
-			let edit_refs: Vec<Arc<dyn Edit>> = self.by_handle.get(&handle)
-				.map(|ids| ids.iter().map(|&i| self.edits[i as usize].clone()).collect())
-				.unwrap_or_default();
-			Some(RebakeJob { handle, chunk_id, edit_refs })
+			let edit_ids: Vec<u32> = self.by_handle.get(&handle).cloned().unwrap_or_default();
+			let edit_refs: Vec<Arc<dyn Edit>> = edit_ids.iter()
+				.map(|&i| self.edits[i as usize].clone())
+				.collect();
+			Some(BakeJob { handle, chunk_id, edit_ids, edit_refs })
 		}).collect()
 	}
 
