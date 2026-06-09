@@ -1,5 +1,6 @@
 use crate::chunk::build::{Sample, Source, VoxelSample};
 use crate::chunk::material::Material;
+use crate::chunk::sources::LocalEdit;
 use crate::chunk::Chunk;
 use crate::generate::Edit;
 use crate::util::types::{Aabb, ChunkId, WorldPos};
@@ -41,6 +42,10 @@ impl Edit for Sphere {
 			WorldPos::new(self.center.x() - r, self.center.y() - r, self.center.z() - r),
 			WorldPos::new(self.center.x() + r, self.center.y() + r, self.center.z() + r),
 		)
+	}
+
+	fn make_local<'a>(&'a self, chunk_id: ChunkId) -> Option<Box<dyn LocalEdit + 'a>> {
+		Some(Box::new(self.local(chunk_id)?))
 	}
 
 	fn apply(&self, chunk_id: ChunkId, base: Chunk) -> Chunk {
@@ -109,5 +114,26 @@ impl Source for LocalSphere {
 		} else {
 			VoxelSample::Passthrough
 		}
+	}
+}
+
+impl LocalEdit for LocalSphere {
+	#[inline]
+	fn bounds_local(&self) -> [[i32; 3]; 2] {
+		let r = (self.radius_squared as f32).sqrt() as i32 + 1;
+		[
+			[self.center[0] - r, self.center[1] - r, self.center[2] - r],
+			[self.center[0] + r + 1, self.center[1] + r + 1, self.center[2] + r + 1],
+		]
+	}
+
+	#[inline]
+	fn classify(&self, lo: [i32; 3], hi: [i32; 3], depth: u8) -> Sample {
+		<Self as Source>::classify(self, lo, hi, depth)
+	}
+
+	#[inline]
+	fn voxel(&self, v: [i32; 3]) -> VoxelSample {
+		<Self as Source>::voxel(self, v)
 	}
 }

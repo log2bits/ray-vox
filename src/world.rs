@@ -6,6 +6,8 @@ pub mod pbr;
 mod tests;
 
 use crate::Chunk;
+use crate::chunk::build::{build_chunk, CHUNK_SIDE};
+use crate::chunk::sources::{CompositeSource, LocalEdit};
 use crate::generate::Edit;
 use crate::util::Lut;
 use crate::util::types::{ChunkHandle, ChunkId, LodLevel, WorldPos};
@@ -16,12 +18,31 @@ use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-pub fn bake_pure(chunk_id: ChunkId, edits: &[Arc<dyn Edit>]) -> Chunk {
-	let mut chunk = Chunk::new();
-	for edit in edits {
-		chunk = edit.apply(chunk_id, chunk);
+fn dedup_pending_remap(pending: &mut Vec<RemapOp>) {
+	if pending.len() < 2 {
+		return;
 	}
-	chunk
+	let mut last: HashMap<ChunkHandle, u32> = HashMap::with_capacity(pending.len());
+	for (i, op) in pending.iter().enumerate() {
+		last.insert(op.handle(), i as u32);
+	}
+	let mut i = 0u32;
+	pending.retain(|op| {
+		let keep = last.get(&op.handle()) == Some(&i);
+		i += 1;
+		keep
+	});
+}
+
+pub fn bake_pure(chunk_id: ChunkId, edits: &[Arc<dyn Edit>]) -> Chunk {
+	let locals: Vec<Box<dyn LocalEdit + '_>> = edits.iter()
+		.filter_map(|e| e.make_local(chunk_id))
+		.collect();
+	if locals.is_empty() {
+		return Chunk::new();
+	}
+	let composite = CompositeSource::new(&locals, CHUNK_SIDE);
+	build_chunk(&composite)
 }
 
 struct BakeJob {
@@ -110,6 +131,7 @@ impl World {
 	}
 
 	pub fn drive_remaps(&mut self, budget: usize) {
+		dedup_pending_remap(&mut self.clipmap.pending_remap);
 		let add_jobs = self.collect_add_jobs(budget);
 		let remaining = budget - add_jobs.len();
 		let rebake_jobs = self.collect_rebake_jobs(remaining);

@@ -4,6 +4,112 @@ use super::material::Material;
 use super::{Child, Chunk};
 use crate::util::types::ChunkPos;
 
+pub trait LocalEdit: Send {
+	fn bounds_local(&self) -> [[i32; 3]; 2];
+	fn classify(&self, lo: [i32; 3], hi: [i32; 3], depth: u8) -> Sample;
+	fn voxel(&self, v: [i32; 3]) -> VoxelSample;
+}
+
+pub struct CompositeSource<'a> {
+	edits: &'a [Box<dyn LocalEdit + 'a>],
+	active: Vec<u16>,
+	cell_lo: [i32; 3],
+	cell_side: i32,
+}
+
+impl<'a> CompositeSource<'a> {
+	pub fn new(edits: &'a [Box<dyn LocalEdit + 'a>], chunk_side: i32) -> Self {
+		let active: Vec<u16> = (0..edits.len() as u16).collect();
+		Self {
+			edits,
+			active,
+			cell_lo: [0, 0, 0],
+			cell_side: chunk_side,
+		}
+	}
+}
+
+impl<'a> Clone for CompositeSource<'a> {
+	fn clone(&self) -> Self {
+		Self {
+			edits: self.edits,
+			active: self.active.clone(),
+			cell_lo: self.cell_lo,
+			cell_side: self.cell_side,
+		}
+	}
+}
+
+impl<'a> Source for CompositeSource<'a> {
+	fn classify(&self, lo: [i32; 3], hi: [i32; 3], depth: u8) -> Sample {
+		for &i in self.active.iter().rev() {
+			match self.edits[i as usize].classify(lo, hi, depth) {
+				Sample::Passthrough => continue,
+				other => return other,
+			}
+		}
+		Sample::Passthrough
+	}
+
+	fn voxel(&self, v: [i32; 3]) -> VoxelSample {
+		for &i in self.active.iter().rev() {
+			let [b_lo, b_hi] = self.edits[i as usize].bounds_local();
+			if !point_in_box(v, b_lo, b_hi) {
+				continue;
+			}
+			match self.edits[i as usize].voxel(v) {
+				VoxelSample::Passthrough => continue,
+				set => return set,
+			}
+		}
+		VoxelSample::Passthrough
+	}
+
+	fn descend(&self, slot: u8) -> Self {
+		let child_side = self.cell_side / 4;
+		let sx = ((slot >> 4) & 3) as i32;
+		let sy = ((slot >> 2) & 3) as i32;
+		let sz = (slot & 3) as i32;
+		let child_lo = [
+			self.cell_lo[0] + sx * child_side,
+			self.cell_lo[1] + sy * child_side,
+			self.cell_lo[2] + sz * child_side,
+		];
+		let child_hi = [
+			child_lo[0] + child_side,
+			child_lo[1] + child_side,
+			child_lo[2] + child_side,
+		];
+		let mut active = Vec::with_capacity(self.active.len());
+		for &i in &self.active {
+			let [b_lo, b_hi] = self.edits[i as usize].bounds_local();
+			if box_intersects(b_lo, b_hi, child_lo, child_hi) {
+				active.push(i);
+			}
+		}
+		Self {
+			edits: self.edits,
+			active,
+			cell_lo: child_lo,
+			cell_side: child_side,
+		}
+	}
+}
+
+#[inline]
+fn box_intersects(a_lo: [i32; 3], a_hi: [i32; 3], b_lo: [i32; 3], b_hi: [i32; 3]) -> bool {
+	a_hi[0] > b_lo[0] && b_hi[0] > a_lo[0]
+		&& a_hi[1] > b_lo[1] && b_hi[1] > a_lo[1]
+		&& a_hi[2] > b_lo[2] && b_hi[2] > a_lo[2]
+}
+
+#[inline]
+fn point_in_box(p: [i32; 3], lo: [i32; 3], hi: [i32; 3]) -> bool {
+	p[0] >= lo[0] && p[0] < hi[0]
+		&& p[1] >= lo[1] && p[1] < hi[1]
+		&& p[2] >= lo[2] && p[2] < hi[2]
+}
+
 #[derive(Clone, Copy)]
 pub struct ChunkSource<'a> {
 	chunk: &'a Chunk,

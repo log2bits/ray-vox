@@ -15,6 +15,14 @@ pub enum RemapOp {
 	Delete(ChunkHandle),
 }
 
+impl RemapOp {
+	pub fn handle(&self) -> ChunkHandle {
+		match self {
+			RemapOp::Add(h, _) | RemapOp::Delete(h) => *h,
+		}
+	}
+}
+
 impl Clipmap {
 	pub fn new() -> Self {
 		Self {

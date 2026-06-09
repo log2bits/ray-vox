@@ -1,6 +1,7 @@
 pub mod coarsen;
 pub mod import;
 pub mod rvox;
+pub mod stamp;
 
 #[cfg(test)]
 mod tests;

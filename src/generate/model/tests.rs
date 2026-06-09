@@ -188,3 +188,79 @@ fn import_vox_from_synthetic_bytes() {
 	assert_ne!(blue, Material::air(), "blue voxel should be set");
 	assert_ne!(red, blue, "red and blue should be different materials");
 }
+
+#[test]
+fn stamp_places_voxels_at_world_position() {
+	use super::stamp::ModelStamp;
+	use crate::generate::Edit;
+	use std::sync::Arc;
+
+	let m = mat(0x778899AA);
+	let stone_chunk = one_voxel_chunk(ChunkPos::new(5, 6, 7), m);
+	let mut model = Model::empty(Aabb::new(WorldPos::new(0, 0, 0), WorldPos::new(8, 8, 8)));
+	model.chunks.insert(ChunkId::new(WorldPos::new(0, 0, 0), LodLevel::FINEST), stone_chunk);
+
+	let position = WorldPos::new(100, 200, 50);
+	let stamp = ModelStamp::new(Arc::new(model), position);
+
+	let target = ChunkId::new(WorldPos::new(0, 0, 0), LodLevel::FINEST);
+	let baked = stamp.apply(target, Chunk::new());
+
+	assert_eq!(baked.voxel_at(ChunkPos::new(105, 206, 57)), m);
+	assert_eq!(baked.voxel_at(ChunkPos::new(0, 0, 0)), Material::air());
+	assert_eq!(baked.voxel_at(ChunkPos::new(106, 206, 57)), Material::air());
+}
+
+#[test]
+fn stamp_outside_chunk_returns_base_unchanged() {
+	use super::stamp::ModelStamp;
+	use crate::generate::Edit;
+	use std::sync::Arc;
+
+	let m = mat(0x12345678);
+	let chunk = one_voxel_chunk(ChunkPos::new(0, 0, 0), m);
+	let mut model = Model::empty(Aabb::new(WorldPos::new(0, 0, 0), WorldPos::new(4, 4, 4)));
+	model.chunks.insert(ChunkId::new(WorldPos::new(0, 0, 0), LodLevel::FINEST), chunk);
+
+	let far_position = WorldPos::new(10_000, 10_000, 10_000);
+	let stamp = ModelStamp::new(Arc::new(model), far_position);
+
+	let target = ChunkId::new(WorldPos::new(0, 0, 0), LodLevel::FINEST);
+	let base = uniform_chunk(mat(0x0000FF40));
+	let baked = stamp.apply(target, base.clone());
+
+	assert_eq!(baked.voxel_at(ChunkPos::new(0, 0, 0)), base.voxel_at(ChunkPos::new(0, 0, 0)));
+	assert_eq!(baked.voxel_at(ChunkPos::new(128, 128, 128)), base.voxel_at(ChunkPos::new(128, 128, 128)));
+}
+
+#[test]
+fn stamp_at_unaligned_position_routes_voxels_correctly() {
+	use super::stamp::ModelStamp;
+	use crate::generate::Edit;
+	use std::sync::Arc;
+
+	let m_a = mat(0xAAAAAAAA);
+	let m_b = mat(0xBBBBBBBB);
+	let chunk0 = one_voxel_chunk(ChunkPos::new(255, 0, 0), m_a);
+	let chunk1 = one_voxel_chunk(ChunkPos::new(0, 0, 0), m_b);
+	let mut model = Model::empty(Aabb::new(WorldPos::new(0, 0, 0), WorldPos::new(512, 4, 4)));
+	model.chunks.insert(ChunkId::new(WorldPos::new(0, 0, 0), LodLevel::FINEST), chunk0);
+	model.chunks.insert(ChunkId::new(WorldPos::new(256, 0, 0), LodLevel::FINEST), chunk1);
+
+	let position = WorldPos::new(123, 0, 0);
+	let stamp = ModelStamp::new(Arc::new(model), position);
+
+	let target0 = ChunkId::new(WorldPos::new(0, 0, 0), LodLevel::FINEST);
+	let baked0 = stamp.apply(target0, Chunk::new());
+	for x in 0..=255u8 {
+		assert_eq!(baked0.voxel_at(ChunkPos::new(x, 0, 0)), Material::air(),
+			"target0 should be all air at x={}, got non-air", x);
+	}
+
+	let target1 = ChunkId::new(WorldPos::new(256, 0, 0), LodLevel::FINEST);
+	let baked1 = stamp.apply(target1, Chunk::new());
+	assert_eq!(baked1.voxel_at(ChunkPos::new(122, 0, 0)), m_a,
+		"model chunk0 voxel (255) at world x=378 should land at local 122 of world chunk 1");
+	assert_eq!(baked1.voxel_at(ChunkPos::new(123, 0, 0)), m_b,
+		"model chunk1 voxel (0) at world x=379 should land at local 123 of world chunk 1");
+}

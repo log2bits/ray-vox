@@ -31,43 +31,40 @@ impl Model {
 			.collect();
 
 		let mut voxel_buf: VoxelBuf = VoxelBuf::default();
+		let origin = WorldPos::new(0, 0, 0);
 		if data.scenes.is_empty() {
 			for (i, _model) in data.models.iter().enumerate() {
-				emit_model_at_corner(&data, i as u32, [0, 0, 0], &palette, &mut voxel_buf);
+				emit_model_at_corner(&data, i as u32, origin, &palette, &mut voxel_buf);
 			}
 		} else {
-			walk_scene(&data, 0, [0, 0, 0], &palette, &mut voxel_buf);
+			walk_scene(&data, 0, origin, &palette, &mut voxel_buf);
 		}
 
 		if voxel_buf.entries.is_empty() {
 			return Ok(Model {
 				chunks: HashMap::new(),
-				bounds: Aabb::new(WorldPos::new(0, 0, 0), WorldPos::new(0, 0, 0)),
+				bounds: Aabb::new(origin, origin),
 			});
 		}
 		let (mut min_x, mut min_y, mut min_z) = (i32::MAX, i32::MAX, i32::MAX);
 		let (mut max_x, mut max_y, mut max_z) = (i32::MIN, i32::MIN, i32::MIN);
 		for &(p, _) in &voxel_buf.entries {
-			min_x = min_x.min(p[0]); min_y = min_y.min(p[1]); min_z = min_z.min(p[2]);
-			max_x = max_x.max(p[0] + 1); max_y = max_y.max(p[1] + 1); max_z = max_z.max(p[2] + 1);
+			min_x = min_x.min(p.x()); min_y = min_y.min(p.y()); min_z = min_z.min(p.z());
+			max_x = max_x.max(p.x() + 1); max_y = max_y.max(p.y() + 1); max_z = max_z.max(p.z() + 1);
 		}
-		let shift = [-min_x, -min_y, -min_z];
+		let shift = WorldPos::new(-min_x, -min_y, -min_z);
 
 		let fine = LodLevel::FINEST;
 		let chunk_size = fine.chunk_size();
 		let mut by_chunk: HashMap<ChunkId, EditPacket> = HashMap::new();
 		for &(world, material) in &voxel_buf.entries {
-			let p = [world[0] + shift[0], world[1] + shift[1], world[2] + shift[2]];
-			let chunk_origin = WorldPos::new(
-				align_down(p[0], chunk_size),
-				align_down(p[1], chunk_size),
-				align_down(p[2], chunk_size),
-			);
+			let p = world + shift;
+			let chunk_origin = p.map(|c| align_down(c, chunk_size));
 			let chunk_id = ChunkId::new(chunk_origin, fine);
 			let local = ChunkPos::new(
-				(p[0] - chunk_origin.x()) as u8,
-				(p[1] - chunk_origin.y()) as u8,
-				(p[2] - chunk_origin.z()) as u8,
+				(p.x() - chunk_origin.x()) as u8,
+				(p.y() - chunk_origin.y()) as u8,
+				(p.z() - chunk_origin.z()) as u8,
 			);
 			by_chunk.entry(chunk_id).or_default()
 				.push(Path::from_coords(local, 4), material);
@@ -95,13 +92,13 @@ impl Model {
 
 #[derive(Default)]
 struct VoxelBuf {
-	entries: Vec<([i32; 3], Material)>,
+	entries: Vec<(WorldPos, Material)>,
 }
 
 fn walk_scene(
 	data: &DotVoxData,
 	node_idx: u32,
-	offset: [i32; 3],
+	offset: WorldPos,
 	palette: &[Material],
 	buf: &mut VoxelBuf,
 ) {
@@ -114,7 +111,7 @@ fn walk_scene(
 			let mut new_offset = offset;
 			if let Some(frame) = frames.first() {
 				if let Some(p) = frame.position() {
-					new_offset = [offset[0] + p.x, offset[1] + p.y, offset[2] + p.z];
+					new_offset = offset + WorldPos::new(p.x, p.y, p.z);
 				}
 			}
 			walk_scene(data, *child, new_offset, palette, buf);
@@ -135,7 +132,7 @@ fn walk_scene(
 fn emit_model(
 	data: &DotVoxData,
 	model_id: u32,
-	center: [i32; 3],
+	center: WorldPos,
 	palette: &[Material],
 	buf: &mut VoxelBuf,
 ) {
@@ -143,18 +140,18 @@ fn emit_model(
 		Some(m) => m,
 		None => return,
 	};
-	let corner = [
-		center[0] - model.size.x as i32 / 2,
-		center[1] - model.size.y as i32 / 2,
-		center[2] - model.size.z as i32 / 2,
-	];
+	let corner = center - WorldPos::new(
+		model.size.x as i32 / 2,
+		model.size.y as i32 / 2,
+		model.size.z as i32 / 2,
+	);
 	emit_model_at_corner(data, model_id, corner, palette, buf);
 }
 
 fn emit_model_at_corner(
 	data: &DotVoxData,
 	model_id: u32,
-	corner: [i32; 3],
+	corner: WorldPos,
 	palette: &[Material],
 	buf: &mut VoxelBuf,
 ) {
@@ -163,11 +160,7 @@ fn emit_model_at_corner(
 		None => return,
 	};
 	for v in &model.voxels {
-		let world = [
-			corner[0] + v.x as i32,
-			corner[1] + v.y as i32,
-			corner[2] + v.z as i32,
-		];
+		let world = corner + WorldPos::new(v.x as i32, v.y as i32, v.z as i32);
 		let m = palette.get(v.i as usize).copied().unwrap_or(Material::air());
 		if m.is_air() {
 			continue;
