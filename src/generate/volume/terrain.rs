@@ -139,7 +139,7 @@ impl Source for LocalTerrain {
 		let wy = self.chunk_origin.y() + v[1] * self.voxel_size;
 		let wz = self.chunk_origin.z() + v[2] * self.voxel_size;
 		if wy < self.height(wx, wz) {
-			VoxelSample::Set(self.material)
+			VoxelSample::Fill(self.material)
 		} else {
 			VoxelSample::Passthrough
 		}

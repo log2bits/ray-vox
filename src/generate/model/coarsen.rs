@@ -74,18 +74,18 @@ impl<'a> Source for CoarsenSource<'a> {
 		match self.cursor {
 			Cursor::Root => unreachable!("coarsen root reached voxel level"),
 			Cursor::Empty => VoxelSample::Passthrough,
-			Cursor::Filled(m) => VoxelSample::Set(m),
+			Cursor::Filled(m) => VoxelSample::Fill(m),
 			Cursor::Interior { chunk, idx } => {
 				let n = &chunk.interior_nodes[idx as usize];
 				match n.masks.state(slot) {
 					CellState::Empty => VoxelSample::Passthrough,
-					_ => VoxelSample::Set(chunk.materials.get(n.material_index(slot))),
+					_ => VoxelSample::Fill(chunk.materials.get(n.material_index(slot))),
 				}
 			}
 			Cursor::Leaf { chunk, idx } => {
 				let leaf = &chunk.leaf_nodes[idx as usize];
 				if leaf.occupancy.contains(slot) {
-					VoxelSample::Set(chunk.materials.get(leaf.material_index(slot)))
+					VoxelSample::Fill(chunk.materials.get(leaf.material_index(slot)))
 				} else {
 					VoxelSample::Passthrough
 				}

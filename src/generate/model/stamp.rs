@@ -398,7 +398,7 @@ impl<'a> Source for ModelStampSource<'a> {
 
 	fn voxel(&self, v: [i32; 3]) -> VoxelSample {
 		match self.lookup_voxel(v) {
-			Some(m) => VoxelSample::Set(m),
+			Some(m) => VoxelSample::Fill(m),
 			None => VoxelSample::Passthrough,
 		}
 	}

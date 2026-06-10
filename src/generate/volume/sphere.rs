@@ -96,7 +96,7 @@ impl Source for LocalSphere {
 	#[inline]
 	fn voxel(&self, v: [i32; 3]) -> VoxelSample {
 		if self.contains(v) {
-			VoxelSample::Set(self.material)
+			VoxelSample::Fill(self.material)
 		} else {
 			VoxelSample::Passthrough
 		}

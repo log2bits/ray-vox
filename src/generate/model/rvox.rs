@@ -4,7 +4,7 @@ use crate::util::types::{Aabb, ChunkId, LodLevel, WorldPos};
 use std::io::{self, Read, Write};
 
 const MAGIC: &[u8; 4] = b"RVOX";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 #[derive(Debug)]
 pub enum RvoxError {

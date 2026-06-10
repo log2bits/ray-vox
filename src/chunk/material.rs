@@ -29,7 +29,7 @@ impl Material {
 		]
 	}
 
-	pub fn material(self) -> u8 {
+	pub fn pbr_id(self) -> u8 {
 		((self.0 >> 4) & 0xF) as u8
 	}
 }

@@ -195,4 +195,24 @@ impl PackedVec {
 			(1u32 << bits) - 1
 		}
 	}
+
+	pub fn byte_size(&self) -> u32 {
+		12 + (self.words.len() * 4) as u32
+	}
+
+	pub fn write_bytes<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
+		let header = [self.len, self.bits, self.words.len() as u32];
+		w.write_all(bytemuck::cast_slice(&header))?;
+		w.write_all(bytemuck::cast_slice(&self.words))?;
+		Ok(())
+	}
+
+	pub fn read_bytes<R: std::io::Read>(r: &mut R) -> std::io::Result<Self> {
+		let mut header = [0u32; 3];
+		r.read_exact(bytemuck::cast_slice_mut(&mut header))?;
+		let [len, bits, words_count] = header;
+		let mut words = vec![0u32; words_count as usize];
+		r.read_exact(bytemuck::cast_slice_mut(&mut words))?;
+		Ok(Self { words, bits, len })
+	}
 }

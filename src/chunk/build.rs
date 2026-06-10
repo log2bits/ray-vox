@@ -16,7 +16,7 @@ pub enum Sample {
 #[derive(Copy, Clone, Debug)]
 pub enum VoxelSample {
 	Passthrough,
-	Set(Material),
+	Fill(Material),
 }
 
 pub trait Source: Sized + Clone {
@@ -149,7 +149,7 @@ fn build_leaf<S: Source>(arena: &mut Arena, source: &S, lo: [i32; 3]) -> Child {
 			for z in 0..4i32 {
 				let m = match source.voxel([lo[0] + x, lo[1] + y, lo[2] + z]) {
 					VoxelSample::Passthrough => Material::air(),
-					VoxelSample::Set(m) => m,
+					VoxelSample::Fill(m) => m,
 				};
 				if !m.is_air() {
 					let slot = ((x as u8) << 4) | ((y as u8) << 2) | z as u8;

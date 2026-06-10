@@ -36,6 +36,7 @@ impl Child {
 	}
 }
 
+#[derive(Clone, Default)]
 pub struct Chunk {
 	pub leaf_nodes: Vec<LeafNode>,
 	pub materials: PalettedVec<Material>,
@@ -81,19 +82,22 @@ impl Chunk {
 		}
 	}
 
+	#[inline]
+	fn leaf_voxel(&self, leaf: &LeafNode, slot: u8) -> Material {
+		if leaf.occupancy.contains(slot) {
+			self.materials.get(leaf.material_index(slot))
+		} else {
+			Material::air()
+		}
+	}
+
 	pub fn voxel_at(&self, pos: ChunkPos) -> Material {
 		if self.interior_nodes.is_empty() && self.leaf_nodes.is_empty() {
 			return self.chunk_lod();
 		}
 		let path = Path::from_coords(pos, 4);
 		if self.interior_nodes.is_empty() {
-			let leaf = &self.leaf_nodes[0];
-			let slot = path.slot_at(0);
-			return if leaf.occupancy.contains(slot) {
-				self.materials.get(leaf.material_index(slot))
-			} else {
-				Material::air()
-			};
+			return self.leaf_voxel(&self.leaf_nodes[0], path.slot_at(0));
 		}
 		let mut idx = self.root_idx();
 		for d in 0..3u8 {
@@ -103,54 +107,32 @@ impl Chunk {
 				Child::Filled(m) => return m,
 				Child::Interior(child) => idx = child,
 				Child::Leaf(leaf_idx) => {
-					let leaf = &self.leaf_nodes[leaf_idx as usize];
-					let lslot = path.slot_at(d + 1);
-					return if leaf.occupancy.contains(lslot) {
-						self.materials.get(leaf.material_index(lslot))
-					} else {
-						Material::air()
-					};
+					return self.leaf_voxel(&self.leaf_nodes[leaf_idx as usize], path.slot_at(d + 1));
 				}
 			}
 		}
 		Material::air()
 	}
 
-	pub const HEADER_BYTES: u32 = 6 * 4;
-
 	pub fn byte_size(&self) -> u32 {
-		let header = Chunk::HEADER_BYTES as usize;
-		let interior = self.interior_nodes.len() * size_of::<InteriorNode>();
-		let leaf = self.leaf_nodes.len() * size_of::<LeafNode>();
-		let lut = self.materials.lut.values.len() * size_of::<Material>();
-		let indices = self.materials.indices.words.len() * size_of::<u32>();
-		(header + interior + leaf + lut + indices) as u32
-	}
-
-	fn header_words(&self) -> [u32; 6] {
-		[
-			self.interior_nodes.len() as u32,
-			self.leaf_nodes.len() as u32,
-			self.materials.lut.values.len() as u32,
-			self.materials.indices.len,
-			self.materials.indices.bits,
-			self.materials.indices.words.len() as u32,
-		]
+		8 + (self.interior_nodes.len() * size_of::<InteriorNode>()
+			+ self.leaf_nodes.len() * size_of::<LeafNode>()) as u32
+			+ self.materials.byte_size()
 	}
 
 	pub fn write_bytes<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
-		w.write_all(bytemuck::cast_slice(&self.header_words()))?;
+		let header = [self.interior_nodes.len() as u32, self.leaf_nodes.len() as u32];
+		w.write_all(bytemuck::cast_slice(&header))?;
 		w.write_all(bytemuck::cast_slice(&self.interior_nodes))?;
 		w.write_all(bytemuck::cast_slice(&self.leaf_nodes))?;
-		w.write_all(bytemuck::cast_slice(&self.materials.lut.values))?;
-		w.write_all(bytemuck::cast_slice(&self.materials.indices.words))?;
+		self.materials.write_bytes(w)?;
 		Ok(())
 	}
 
 	pub fn read_bytes<R: std::io::Read>(r: &mut R) -> std::io::Result<Chunk> {
-		let mut header = [0u32; 6];
+		let mut header = [0u32; 2];
 		r.read_exact(bytemuck::cast_slice_mut(&mut header))?;
-		let [interior_count, leaf_count, lut_count, indices_len, indices_bits, indices_words] = header;
+		let [interior_count, leaf_count] = header;
 
 		let mut interior_nodes = vec![InteriorNode::default(); interior_count as usize];
 		r.read_exact(bytemuck::cast_slice_mut(&mut interior_nodes))?;
@@ -158,19 +140,7 @@ impl Chunk {
 		let mut leaf_nodes = vec![LeafNode::default(); leaf_count as usize];
 		r.read_exact(bytemuck::cast_slice_mut(&mut leaf_nodes))?;
 
-		let mut lut_values = vec![Material::default(); lut_count as usize];
-		r.read_exact(bytemuck::cast_slice_mut(&mut lut_values))?;
-
-		let mut indices_words_vec = vec![0u32; indices_words as usize];
-		r.read_exact(bytemuck::cast_slice_mut(&mut indices_words_vec))?;
-
-		let mut materials = PalettedVec::new();
-		materials.lut.values = lut_values;
-		materials.indices = crate::util::PackedVec {
-			words: indices_words_vec,
-			bits: indices_bits,
-			len: indices_len,
-		};
+		let materials = PalettedVec::read_bytes(r)?;
 		Ok(Chunk { leaf_nodes, materials, interior_nodes })
 	}
 
@@ -178,21 +148,5 @@ impl Chunk {
 		let base = ChunkSource::new(&self);
 		let overlay = Overlay::new(base, source.clone());
 		build::build_chunk(&overlay)
-	}
-}
-
-impl Default for Chunk {
-	fn default() -> Self {
-		Self::new()
-	}
-}
-
-impl Clone for Chunk {
-	fn clone(&self) -> Self {
-		Self {
-			leaf_nodes: self.leaf_nodes.clone(),
-			materials: self.materials.clone(),
-			interior_nodes: self.interior_nodes.clone(),
-		}
 	}
 }

@@ -88,7 +88,7 @@ impl<'a> Source for CompositeSource<'a> {
 			}
 			match self.edits[i as usize].voxel(v) {
 				VoxelSample::Passthrough => continue,
-				set => return set,
+				fill => return fill,
 			}
 		}
 		VoxelSample::Passthrough
@@ -174,12 +174,12 @@ impl Source for ChunkSource<'_> {
 	fn voxel(&self, v: [i32; 3]) -> VoxelSample {
 		match self.state {
 			Child::Empty => VoxelSample::Passthrough,
-			Child::Filled(m) => VoxelSample::Set(m),
+			Child::Filled(m) => VoxelSample::Fill(m),
 			Child::Leaf(idx) => {
 				let leaf = &self.chunk.leaf_nodes[idx as usize];
 				let slot = pack_slot(v);
 				if leaf.occupancy.contains(slot) {
-					VoxelSample::Set(self.chunk.materials.get(leaf.material_index(slot)))
+					VoxelSample::Fill(self.chunk.materials.get(leaf.material_index(slot)))
 				} else {
 					VoxelSample::Passthrough
 				}
@@ -253,11 +253,11 @@ impl<'a> Source for DiscreteSource<'a> {
 		let target = u32::from(Path::from_coords(pos, 4));
 		for &(p, m) in self.edits.iter().rev() {
 			if u32::from(p) == target {
-				return VoxelSample::Set(m);
+				return VoxelSample::Fill(m);
 			}
 		}
 		match self.inherited {
-			Some(m) => VoxelSample::Set(m),
+			Some(m) => VoxelSample::Fill(m),
 			None => VoxelSample::Passthrough,
 		}
 	}
