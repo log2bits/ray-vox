@@ -11,7 +11,6 @@ pub fn coarsen(finer: &[Option<&Chunk>; 64]) -> Chunk {
 struct CoarsenSource<'a> {
 	children: &'a [Option<&'a Chunk>; 64],
 	cursor: Cursor<'a>,
-	coarse_depth: u8,
 }
 
 #[derive(Clone, Copy)]
@@ -25,37 +24,20 @@ enum Cursor<'a> {
 
 impl<'a> CoarsenSource<'a> {
 	fn new(children: &'a [Option<&'a Chunk>; 64]) -> Self {
-		Self { children, cursor: Cursor::Root, coarse_depth: 0 }
+		Self { children, cursor: Cursor::Root }
+	}
+
+	fn cursor_from_child(chunk: &'a Chunk, c: Child) -> Cursor<'a> {
+		match c {
+			Child::Empty => Cursor::Empty,
+			Child::Filled(m) => Cursor::Filled(m),
+			Child::Interior(idx) => Cursor::Interior { chunk, idx },
+			Child::Leaf(idx) => Cursor::Leaf { chunk, idx },
+		}
 	}
 
 	fn cursor_at_chunk_root(chunk: &'a Chunk) -> Cursor<'a> {
-		if chunk.is_empty() {
-			Cursor::Empty
-		} else if chunk.is_uniform() {
-			Cursor::Filled(chunk.materials.get(0))
-		} else if chunk.interior_nodes.is_empty() {
-			Cursor::Leaf { chunk, idx: 0 }
-		} else {
-			Cursor::Interior { chunk, idx: chunk.root_idx() }
-		}
-	}
-
-	fn descend_interior(chunk: &'a Chunk, idx: u32, slot: u8) -> Cursor<'a> {
-		match chunk.child(idx, slot) {
-			Child::Empty => Cursor::Empty,
-			Child::Filled(m) => Cursor::Filled(m),
-			Child::Interior(c) => Cursor::Interior { chunk, idx: c },
-			Child::Leaf(c) => Cursor::Leaf { chunk, idx: c },
-		}
-	}
-
-	fn descend_leaf(chunk: &'a Chunk, idx: u32, slot: u8) -> Cursor<'a> {
-		let leaf = &chunk.leaf_nodes[idx as usize];
-		if leaf.occupancy.contains(slot) {
-			Cursor::Filled(chunk.materials.get(leaf.material_index(slot)))
-		} else {
-			Cursor::Empty
-		}
+		Self::cursor_from_child(chunk, chunk.root_child())
 	}
 }
 
@@ -82,19 +64,11 @@ impl<'a> Source for CoarsenSource<'a> {
 					_ => VoxelSample::Fill(chunk.materials.get(n.material_index(slot))),
 				}
 			}
-			Cursor::Leaf { chunk, idx } => {
-				let leaf = &chunk.leaf_nodes[idx as usize];
-				if leaf.occupancy.contains(slot) {
-					VoxelSample::Fill(chunk.materials.get(leaf.material_index(slot)))
-				} else {
-					VoxelSample::Passthrough
-				}
-			}
+			Cursor::Leaf { chunk, idx } => chunk.leaf_voxel_sample(idx, slot),
 		}
 	}
 
 	fn descend(&self, slot: u8) -> Self {
-		let child_depth = self.coarse_depth + 1;
 		let new_cursor = match self.cursor {
 			Cursor::Root => match self.children[slot as usize] {
 				None => Cursor::Empty,
@@ -102,9 +76,13 @@ impl<'a> Source for CoarsenSource<'a> {
 			},
 			Cursor::Empty => Cursor::Empty,
 			Cursor::Filled(m) => Cursor::Filled(m),
-			Cursor::Interior { chunk, idx } => Self::descend_interior(chunk, idx, slot),
-			Cursor::Leaf { chunk, idx } => Self::descend_leaf(chunk, idx, slot),
+			Cursor::Interior { chunk, idx } => {
+				Self::cursor_from_child(chunk, chunk.descend_child(Child::Interior(idx), slot))
+			}
+			Cursor::Leaf { chunk, idx } => {
+				Self::cursor_from_child(chunk, chunk.descend_child(Child::Leaf(idx), slot))
+			}
 		};
-		Self { children: self.children, cursor: new_cursor, coarse_depth: child_depth }
+		Self { children: self.children, cursor: new_cursor }
 	}
 }

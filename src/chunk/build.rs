@@ -1,7 +1,7 @@
 use ahash::AHashMap;
 
 use super::material::Material;
-use super::node::{ChildMasks, InteriorNode, LeafNode};
+use super::node::{ChildMasks, InteriorNode, LeafNode, unpack_slot};
 use super::{Child, Chunk};
 use crate::util::PalettedVec;
 use crate::util::types::Mask64;
@@ -57,11 +57,6 @@ impl Arena {
 		self.interiors.push(children);
 		Child::Interior(id)
 	}
-}
-
-#[inline]
-fn slot_xyz(slot: u8) -> (i32, i32, i32) {
-	(((slot >> 4) & 3) as i32, ((slot >> 2) & 3) as i32, (slot & 3) as i32)
 }
 
 fn classify_children(arena: &mut Arena, children: [Child; 64]) -> Child {
@@ -126,7 +121,7 @@ fn build_cell<S: Source>(
 				let child_side = side / 4;
 				let mut children: [Child; 64] = [Child::Empty; 64];
 				for slot in 0..64u8 {
-					let (sx, sy, sz) = slot_xyz(slot);
+					let [sx, sy, sz] = unpack_slot(slot);
 					let child_lo = [
 						lo[0] + sx * child_side,
 						lo[1] + sy * child_side,

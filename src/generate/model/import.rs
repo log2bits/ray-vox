@@ -3,7 +3,7 @@ use crate::Chunk;
 use crate::chunk::edit::{EditPacket, Path};
 use crate::chunk::material::Material;
 use crate::chunk::sources::DiscreteSource;
-use crate::util::types::{Aabb, ChunkId, ChunkPos, LodLevel, WorldPos};
+use crate::util::types::{Aabb, ChunkId, LodLevel, WorldPos};
 use dot_vox::{DotVoxData, SceneNode};
 use std::collections::HashMap;
 
@@ -55,17 +55,11 @@ impl Model {
 		let shift = WorldPos::new(-min_x, -min_y, -min_z);
 
 		let fine = LodLevel::FINEST;
-		let chunk_size = fine.chunk_size();
 		let mut by_chunk: HashMap<ChunkId, EditPacket> = HashMap::new();
 		for &(world, material) in &voxel_buf.entries {
 			let p = world + shift;
-			let chunk_origin = p.map(|c| align_down(c, chunk_size));
-			let chunk_id = ChunkId::new(chunk_origin, fine);
-			let local = ChunkPos::new(
-				(p.x() - chunk_origin.x()) as u8,
-				(p.y() - chunk_origin.y()) as u8,
-				(p.z() - chunk_origin.z()) as u8,
-			);
+			let chunk_id = p.chunk_id(fine);
+			let local = p.chunk_pos(chunk_id.origin, fine);
 			by_chunk.entry(chunk_id).or_default()
 				.push(Path::from_coords(local, 4), material);
 		}
@@ -169,7 +163,3 @@ fn emit_model_at_corner(
 	}
 }
 
-#[inline]
-fn align_down(v: i32, alignment: i32) -> i32 {
-	v.div_euclid(alignment) * alignment
-}

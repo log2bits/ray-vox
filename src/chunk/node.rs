@@ -25,6 +25,12 @@ pub fn pack_slot(v: [i32; 3]) -> u8 {
 	(((v[0] & 3) << 4) | ((v[1] & 3) << 2) | (v[2] & 3)) as u8
 }
 
+/// Inverse of `pack_slot`: extract `(x, y, z)` from a 6-bit slot index.
+#[inline]
+pub fn unpack_slot(slot: u8) -> [i32; 3] {
+	[((slot >> 4) & 3) as i32, ((slot >> 2) & 3) as i32, (slot & 3) as i32]
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
 pub struct ChildMasks {

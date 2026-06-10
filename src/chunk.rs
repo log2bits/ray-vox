@@ -11,7 +11,7 @@ mod tests;
 use crate::util::PalettedVec;
 use crate::util::types::ChunkPos;
 use bytemuck;
-use build::Source;
+use build::{Source, VoxelSample};
 use edit::Path;
 use material::Material;
 use node::{CellState, InteriorNode, LeafNode};
@@ -72,6 +72,22 @@ impl Chunk {
 		(self.interior_nodes.len() - 1) as u32
 	}
 
+	/// The `Child` representing this chunk's root cell.
+	///
+	/// Collapses the four storage shapes (empty, uniform, single leaf at root,
+	/// or interior tree) into one state for downstream traversal.
+	pub fn root_child(&self) -> Child {
+		if self.is_empty() {
+			Child::Empty
+		} else if self.is_uniform() {
+			Child::Filled(self.materials.get(0))
+		} else if self.interior_nodes.is_empty() {
+			Child::Leaf(0)
+		} else {
+			Child::Interior(self.root_idx())
+		}
+	}
+
 	pub fn child(&self, node_idx: u32, slot: u8) -> Child {
 		let n = &self.interior_nodes[node_idx as usize];
 		match n.masks.state(slot) {
@@ -88,6 +104,33 @@ impl Chunk {
 			self.materials.get(leaf.material_index(slot))
 		} else {
 			Material::air()
+		}
+	}
+
+	/// Descend one tree level from `state` through `slot`. Empty/Filled propagate
+	/// unchanged; Interior reads the child; Leaf reads the leaf-slot's voxel and
+	/// collapses to Empty (air) or Filled.
+	pub fn descend_child(&self, state: Child, slot: u8) -> Child {
+		match state {
+			Child::Empty => Child::Empty,
+			Child::Filled(m) => Child::Filled(m),
+			Child::Interior(idx) => self.child(idx, slot),
+			Child::Leaf(leaf_idx) => {
+				let leaf = &self.leaf_nodes[leaf_idx as usize];
+				if leaf.occupancy.contains(slot) {
+					Child::Filled(self.materials.get(leaf.material_index(slot)))
+				} else {
+					Child::Empty
+				}
+			}
+		}
+	}
+
+	/// Voxel sample for the cell at `slot` inside a depth-3 leaf.
+	pub fn leaf_voxel_sample(&self, leaf_idx: u32, slot: u8) -> VoxelSample {
+		match self.leaf_voxel(&self.leaf_nodes[leaf_idx as usize], slot) {
+			m if m.is_air() => VoxelSample::Passthrough,
+			m => VoxelSample::Fill(m),
 		}
 	}
 

@@ -36,34 +36,16 @@ impl Clipmap {
 
 	pub fn set_origin(&mut self, new_camera_pos: WorldPos) {
 		self.pending_camera_pos = new_camera_pos;
-
-		for level in 0..LodLevel::LEVELS {
-			let lod = LodLevel::new(level);
-			let new_origin = lod.level_origin(new_camera_pos);
-			let chunk_size = lod.chunk_size();
-
-			for x in 0..LodLevel::GRID_SIZE {
-				for y in 0..LodLevel::GRID_SIZE {
-					for z in 0..LodLevel::GRID_SIZE {
-						let new_world_origin = WorldPos::new(
-							new_origin.x() + (x as i32) * chunk_size,
-							new_origin.y() + (y as i32) * chunk_size,
-							new_origin.z() + (z as i32) * chunk_size,
-						);
-						let new_id = ChunkId::new(new_world_origin, lod);
-						let handle = new_id.handle();
-
-						match self.resident.get(&handle).copied() {
-							Some(prev) if prev == new_id => {}
-							Some(_) => {
-								self.pending_remap.push(RemapOp::Delete(handle));
-								self.pending_remap.push(RemapOp::Add(handle, new_id));
-							}
-							None => {
-								self.pending_remap.push(RemapOp::Add(handle, new_id));
-							}
-						}
-					}
+		for new_id in slots_for(new_camera_pos) {
+			let handle = new_id.handle();
+			match self.resident.get(&handle).copied() {
+				Some(prev) if prev == new_id => {}
+				Some(_) => {
+					self.pending_remap.push(RemapOp::Delete(handle));
+					self.pending_remap.push(RemapOp::Add(handle, new_id));
+				}
+				None => {
+					self.pending_remap.push(RemapOp::Add(handle, new_id));
 				}
 			}
 		}
@@ -119,4 +101,26 @@ impl Default for Clipmap {
 
 pub const fn total_chunk_count() -> usize {
 	LodLevel::CHUNKS_PER_LEVEL as usize * LodLevel::LEVELS as usize
+}
+
+/// Iterate every (LOD, grid-cell) slot in the clipmap windowed at `camera_pos`,
+/// yielding the corresponding `ChunkId`.
+pub fn slots_for(camera_pos: WorldPos) -> impl Iterator<Item = ChunkId> {
+	(0..LodLevel::LEVELS).flat_map(move |level| {
+		let lod = LodLevel::new(level);
+		let origin = lod.level_origin(camera_pos);
+		let chunk_size = lod.chunk_size();
+		(0..LodLevel::GRID_SIZE).flat_map(move |x| {
+			(0..LodLevel::GRID_SIZE).flat_map(move |y| {
+				(0..LodLevel::GRID_SIZE).map(move |z| {
+					let chunk_origin = WorldPos::new(
+						origin.x() + (x as i32) * chunk_size,
+						origin.y() + (y as i32) * chunk_size,
+						origin.z() + (z as i32) * chunk_size,
+					);
+					ChunkId::new(chunk_origin, lod)
+				})
+			})
+		})
+	})
 }

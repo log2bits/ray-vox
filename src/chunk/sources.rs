@@ -1,7 +1,7 @@
 use super::build::{Sample, Source, VoxelSample};
 use super::edit::Path;
 use super::material::Material;
-use super::node::pack_slot;
+use super::node::{pack_slot, unpack_slot};
 use super::{Child, Chunk};
 use crate::util::types::ChunkPos;
 
@@ -96,9 +96,7 @@ impl<'a> Source for CompositeSource<'a> {
 
 	fn descend(&self, slot: u8) -> Self {
 		let child_side = self.cell_side / 4;
-		let sx = ((slot >> 4) & 3) as i32;
-		let sy = ((slot >> 2) & 3) as i32;
-		let sz = (slot & 3) as i32;
+		let [sx, sy, sz] = unpack_slot(slot);
 		let child_lo = [
 			self.cell_lo[0] + sx * child_side,
 			self.cell_lo[1] + sy * child_side,
@@ -147,16 +145,7 @@ pub struct ChunkSource<'a> {
 
 impl<'a> ChunkSource<'a> {
 	pub fn new(chunk: &'a Chunk) -> Self {
-		let state = if chunk.is_empty() {
-			Child::Empty
-		} else if chunk.is_uniform() {
-			Child::Filled(chunk.materials.get(0))
-		} else if chunk.interior_nodes.is_empty() {
-			Child::Leaf(0)
-		} else {
-			Child::Interior(chunk.root_idx())
-		};
-		Self { chunk, state }
+		Self { chunk, state: chunk.root_child() }
 	}
 }
 
@@ -175,35 +164,14 @@ impl Source for ChunkSource<'_> {
 		match self.state {
 			Child::Empty => VoxelSample::Passthrough,
 			Child::Filled(m) => VoxelSample::Fill(m),
-			Child::Leaf(idx) => {
-				let leaf = &self.chunk.leaf_nodes[idx as usize];
-				let slot = pack_slot(v);
-				if leaf.occupancy.contains(slot) {
-					VoxelSample::Fill(self.chunk.materials.get(leaf.material_index(slot)))
-				} else {
-					VoxelSample::Passthrough
-				}
-			}
+			Child::Leaf(idx) => self.chunk.leaf_voxel_sample(idx, pack_slot(v)),
 			Child::Interior(_) => unreachable!("interior node reached at voxel level"),
 		}
 	}
 
 	#[inline]
 	fn descend(&self, slot: u8) -> Self {
-		let state = match self.state {
-			Child::Empty => Child::Empty,
-			Child::Filled(m) => Child::Filled(m),
-			Child::Interior(idx) => self.chunk.child(idx, slot),
-			Child::Leaf(leaf_idx) => {
-				let leaf = &self.chunk.leaf_nodes[leaf_idx as usize];
-				if leaf.occupancy.contains(slot) {
-					Child::Filled(self.chunk.materials.get(leaf.material_index(slot)))
-				} else {
-					Child::Empty
-				}
-			}
-		};
-		Self { chunk: self.chunk, state }
+		Self { chunk: self.chunk, state: self.chunk.descend_child(self.state, slot) }
 	}
 }
 

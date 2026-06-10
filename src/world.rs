@@ -10,9 +10,9 @@ use crate::chunk::build::{build_chunk, CHUNK_SIDE};
 use crate::chunk::sources::{CompositeSource, LocalEdit};
 use crate::generate::Edit;
 use crate::util::Lut;
-use crate::util::types::{ChunkHandle, ChunkId, LodLevel, WorldPos};
+use crate::util::types::{ChunkHandle, ChunkId};
 use chunk_pool::ChunkPool;
-use clipmap::{Clipmap, RemapOp};
+use clipmap::{Clipmap, RemapOp, slots_for};
 pub use pbr::Pbr;
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -79,33 +79,18 @@ impl World {
 		let camera_pos = self.clipmap.camera_pos;
 		self.edits.push(edit);
 
-		for level in 0..LodLevel::LEVELS {
-			let lod = LodLevel::new(level);
-			let window_origin = lod.level_origin(camera_pos);
-			let chunk_size = lod.chunk_size();
-			for x in 0..LodLevel::GRID_SIZE {
-				for y in 0..LodLevel::GRID_SIZE {
-					for z in 0..LodLevel::GRID_SIZE {
-						let chunk_origin = WorldPos::new(
-							window_origin.x() + (x as i32) * chunk_size,
-							window_origin.y() + (y as i32) * chunk_size,
-							window_origin.z() + (z as i32) * chunk_size,
-						);
-						let chunk_id = ChunkId::new(chunk_origin, lod);
-						if !chunk_id.aabb().intersects(&bounds) {
-							continue;
-						}
-						let handle = chunk_id.handle();
-						match self.clipmap.chunk_id_of(handle) {
-							Some(resident) if resident == chunk_id => {
-								self.by_handle.entry(handle).or_default().push(id);
-								self.needs_rebake.insert(handle);
-							}
-							_ => {
-								self.clipmap.pending_remap.push(RemapOp::Add(handle, chunk_id));
-							}
-						}
-					}
+		for chunk_id in slots_for(camera_pos) {
+			if !chunk_id.aabb().intersects(&bounds) {
+				continue;
+			}
+			let handle = chunk_id.handle();
+			match self.clipmap.chunk_id_of(handle) {
+				Some(resident) if resident == chunk_id => {
+					self.by_handle.entry(handle).or_default().push(id);
+					self.needs_rebake.insert(handle);
+				}
+				_ => {
+					self.clipmap.pending_remap.push(RemapOp::Add(handle, chunk_id));
 				}
 			}
 		}
@@ -118,10 +103,18 @@ impl World {
 			Some(id) => id,
 			None => return Chunk::new(),
 		};
-		let edits: Vec<Arc<dyn Edit>> = self.by_handle.get(&handle)
-			.map(|ids| ids.iter().map(|&i| self.edits[i as usize].clone()).collect())
-			.unwrap_or_default();
-		bake_pure(chunk_id, &edits)
+		let ids = self.by_handle.get(&handle).cloned().unwrap_or_default();
+		bake_pure(chunk_id, &self.edit_refs(&ids))
+	}
+
+	fn edit_refs(&self, ids: &[u32]) -> Vec<Arc<dyn Edit>> {
+		ids.iter().map(|&i| self.edits[i as usize].clone()).collect()
+	}
+
+	fn edit_ids_for(&self, aabb: &crate::util::types::Aabb) -> Vec<u32> {
+		self.edits.iter().enumerate()
+			.filter_map(|(i, e)| e.bounds().intersects(aabb).then_some(i as u32))
+			.collect()
 	}
 
 	pub fn drive_remaps(&mut self, budget: usize) {
@@ -171,18 +164,11 @@ impl World {
 					if self.clipmap.chunk_id_of(handle) == Some(chunk_id) {
 						continue;
 					}
-					let aabb = chunk_id.aabb();
-					let edit_ids: Vec<u32> = self.edits.iter().enumerate()
-						.filter_map(|(i, e)| {
-							e.bounds().intersects(&aabb).then_some(i as u32)
-						})
-						.collect();
+					let edit_ids = self.edit_ids_for(&chunk_id.aabb());
 					if edit_ids.is_empty() {
 						continue;
 					}
-					let edit_refs: Vec<Arc<dyn Edit>> = edit_ids.iter()
-						.map(|&i| self.edits[i as usize].clone())
-						.collect();
+					let edit_refs = self.edit_refs(&edit_ids);
 					jobs.push(BakeJob { handle, chunk_id, edit_ids, edit_refs });
 				}
 				RemapOp::Delete(handle) => {
@@ -199,10 +185,8 @@ impl World {
 	fn collect_rebake_jobs(&self, budget: usize) -> Vec<BakeJob> {
 		self.needs_rebake.iter().take(budget).filter_map(|&handle| {
 			let chunk_id = self.clipmap.chunk_id_of(handle)?;
-			let edit_ids: Vec<u32> = self.by_handle.get(&handle).cloned().unwrap_or_default();
-			let edit_refs: Vec<Arc<dyn Edit>> = edit_ids.iter()
-				.map(|&i| self.edits[i as usize].clone())
-				.collect();
+			let edit_ids = self.by_handle.get(&handle).cloned().unwrap_or_default();
+			let edit_refs = self.edit_refs(&edit_ids);
 			Some(BakeJob { handle, chunk_id, edit_ids, edit_refs })
 		}).collect()
 	}
@@ -216,13 +200,7 @@ impl World {
 	fn apply_remap_to_edits(&mut self, op: &RemapOp) {
 		match op {
 			RemapOp::Add(handle, chunk_id) => {
-				let aabb = chunk_id.aabb();
-				let mut hits: Vec<u32> = Vec::new();
-				for (i, e) in self.edits.iter().enumerate() {
-					if e.bounds().intersects(&aabb) {
-						hits.push(i as u32);
-					}
-				}
+				let hits = self.edit_ids_for(&chunk_id.aabb());
 				if hits.is_empty() {
 					self.by_handle.remove(handle);
 				} else {

@@ -54,7 +54,7 @@ impl<T: PartialEq + Eq + Hash + Copy> Lut<T> {
 		self.index = AHashMap::new();
 	}
 
-	pub fn bytes(&self) -> u32 {
+	pub fn byte_size(&self) -> u32 {
 		24 + (std::mem::size_of::<T>() * self.values.len()) as u32
 	}
 }
