@@ -31,7 +31,7 @@ fn main() -> anyhow::Result<()> {
 
 	println!("\nimporting (voxelize + mip pyramid)...");
 	let t = Instant::now();
-	let model = Model::import_vox(&bytes)
+	let model = ray_vox::import::vox::import_vox(&bytes)
 		.map_err(|e| anyhow::anyhow!("import failed: {}", e))?;
 	let elapsed = t.elapsed();
 	println!("  {} chunks across all LODs in {:?}", model.chunk_count(), elapsed);

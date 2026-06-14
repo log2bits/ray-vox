@@ -1,7 +1,9 @@
+pub mod builder;
 pub mod coarsen;
-pub mod import;
 pub mod rvox;
 pub mod stamp;
+
+pub use builder::{ModelBuilder, WorldEdit};
 
 #[cfg(test)]
 mod tests;
@@ -9,6 +11,7 @@ mod tests;
 use crate::Chunk;
 use crate::util::types::{Aabb, ChunkId, LodLevel, WorldPos};
 use coarsen::coarsen;
+use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 
 pub struct Model {
@@ -19,6 +22,10 @@ pub struct Model {
 impl Model {
 	pub fn empty(bounds: Aabb) -> Self {
 		Self { chunks: HashMap::new(), bounds }
+	}
+
+	pub fn builder() -> ModelBuilder {
+		ModelBuilder::new()
 	}
 
 	pub fn chunks_at_lod(&self, lod: LodLevel) -> impl Iterator<Item = (&ChunkId, &Chunk)> {
@@ -48,17 +55,18 @@ impl Model {
 				}
 			}
 
-			for parent_id in parent_ids {
-				let children_ids = match parent_id.children() {
-					Some(ids) => ids,
-					None => continue,
-				};
-				let children_refs: [Option<&Chunk>; 64] =
-					std::array::from_fn(|i| self.chunks.get(&children_ids[i]));
-				let parent_chunk = coarsen(&children_refs);
-				if !parent_chunk.is_empty() {
-					self.chunks.insert(parent_id, parent_chunk);
-				}
+			let new_parents: Vec<(ChunkId, Chunk)> = parent_ids
+				.into_par_iter()
+				.filter_map(|parent_id| {
+					let children_ids = parent_id.children()?;
+					let children_refs: [Option<&Chunk>; 64] =
+						std::array::from_fn(|i| self.chunks.get(&children_ids[i]));
+					let parent_chunk = coarsen(&children_refs);
+					if parent_chunk.is_empty() { None } else { Some((parent_id, parent_chunk)) }
+				})
+				.collect();
+			for (parent_id, parent_chunk) in new_parents {
+				self.chunks.insert(parent_id, parent_chunk);
 			}
 
 			current_lod = parent_lod;

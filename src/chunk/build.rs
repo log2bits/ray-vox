@@ -197,6 +197,10 @@ struct Serializer {
 	out_interiors: Vec<InteriorNode>,
 	out_leaves: Vec<LeafNode>,
 	out_materials: PalettedVec<Material>,
+	// Parallel raw view of out_materials, used so overlap-extend and the
+	// full-run verify can read entries without going through the LUT.
+	// Dropped when the chunk finalises.
+	raw_materials: Vec<Material>,
 	run_index: AHashMap<u64, u32>,
 	leaf_sig: AHashMap<u64, u32>,
 	int_sig: AHashMap<u64, u32>,
@@ -210,6 +214,7 @@ impl Serializer {
 			out_interiors: Vec::new(),
 			out_leaves: Vec::new(),
 			out_materials: PalettedVec::new(),
+			raw_materials: Vec::new(),
 			run_index: AHashMap::new(),
 			leaf_sig: AHashMap::new(),
 			int_sig: AHashMap::new(),
@@ -217,27 +222,46 @@ impl Serializer {
 	}
 
 	fn emit_material_run(&mut self, run: &[Material]) -> u32 {
-		let hash = hash_run(run);
-		if let Some(&offset) = self.run_index.get(&hash) {
+		// Full-run exact match.
+		let full_hash = hash_run(run);
+		if let Some(&offset) = self.run_index.get(&full_hash) {
 			if self.run_matches_at(offset, run) {
 				return offset;
 			}
 		}
-		let offset = self.out_materials.len();
-		for &m in run {
-			self.out_materials.push(m);
+
+		// Overlap-extend — find the longest i such that the array's last i
+		// entries equal the run's first i entries. Then we only append
+		// run[i..] and point this node at arr_len - i. Handles the case
+		// where a shorter prefix-equivalent run was emitted before a longer
+		// one (which the full-run hash alone can't catch).
+		let arr_len = self.raw_materials.len();
+		let max_overlap = run.len().min(arr_len);
+		let mut overlap = 0;
+		for i in (1..=max_overlap).rev() {
+			if self.raw_materials[arr_len - i..arr_len] == run[..i] {
+				overlap = i;
+				break;
+			}
 		}
-		self.run_index.entry(hash).or_insert(offset);
+
+		let offset = (arr_len - overlap) as u32;
+		for &m in &run[overlap..] {
+			self.out_materials.push(m);
+			self.raw_materials.push(m);
+		}
+
+		self.run_index.entry(full_hash).or_insert(offset);
+
 		offset
 	}
 
 	fn run_matches_at(&self, offset: u32, run: &[Material]) -> bool {
-		if offset + run.len() as u32 > self.out_materials.len() {
+		let off = offset as usize;
+		if off + run.len() > self.raw_materials.len() {
 			return false;
 		}
-		run.iter()
-			.enumerate()
-			.all(|(i, &m)| self.out_materials.get(offset + i as u32) == m)
+		&self.raw_materials[off..off + run.len()] == run
 	}
 
 	fn intern_leaf(&mut self, leaf: &LeafData) -> u32 {
@@ -415,6 +439,7 @@ pub fn build_chunk<S: Source>(source: &S) -> Chunk {
 	}
 
 	ser.out_materials.push(Material::air());
+	ser.raw_materials.push(Material::air());
 	let (root_cell, chunk_lod) = ser.lower(&arena, root);
 
 	let mut head = Vec::with_capacity(ser.out_materials.len() as usize);

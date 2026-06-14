@@ -181,13 +181,15 @@ fn import_vox_from_synthetic_bytes() {
 	let mut bytes: Vec<u8> = Vec::new();
 	data.write_vox(&mut bytes).expect("write_vox");
 
-	let model = Model::import_vox(&bytes).expect("import");
+	let model = crate::import::vox::import_vox(&bytes).expect("import");
 	assert!(model.chunks.len() > 0, "model should have chunks");
 
 	let finest_id = ChunkId::new(WorldPos::new(0, 0, 0), LodLevel::FINEST);
 	let fine = model.chunks.get(&finest_id).expect("finest chunk");
-	let red = fine.voxel_at(ChunkPos::new(0, 0, 0));
-	let blue = fine.voxel_at(ChunkPos::new(4, 4, 4));
+	// Coords come through un-shifted: vox (1,2,3) and (5,6,7) land in the
+	// finest chunk at chunk-local (1,2,3) and (5,6,7).
+	let red = fine.voxel_at(ChunkPos::new(1, 2, 3));
+	let blue = fine.voxel_at(ChunkPos::new(5, 6, 7));
 	assert_ne!(red, Material::air(), "red voxel should be set");
 	assert_ne!(blue, Material::air(), "blue voxel should be set");
 	assert_ne!(red, blue, "red and blue should be different materials");
