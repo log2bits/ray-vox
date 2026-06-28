@@ -4,7 +4,7 @@ A voxel renderer that ray traces everything (no rasterization). Rust + WebGPU.
 
 ## Data Structure
 
-It's called a CBEPSV64DAG (crazy acronym, I know):
+I call it a CBEPSV64DAG (crazy acronym, I know):
 
 - C, clipmapped. Many trees inside one big clipmap.
 - B, bitpacked. Every value uses only as many bits as it needs.
@@ -162,14 +162,14 @@ voxel_world = chunk_world + decode_path(path) * voxel_size[depth]
 
 Models are precomputed voxelized assets, stored once and stamped many times.
 
-- Imported from gltf, MagicaVoxel `.vox`, or Minecraft `.mca` and voxelized into chunks at a chosen finest LOD.
+- Imported from gltf, MagicaVoxel `.vox`, or Minecraft `.mca` (WIP) and voxelized into chunks at a chosen finest LOD.
 - A full mip pyramid (coarsened via the same `merge_lod` the engine uses for LOD chunks) is built at import time and stored alongside the finest level. The pyramid is ~1.6% larger than the finest level alone, since each level has 1/64 the chunks of the one below.
 - Serialized to `.rvox`, a custom format whose layout matches the GPU buffer representation. The same serializer feeds both disk and VRAM uploads.
 - Stamping a model places it in the world at a chunk-grid-snapped translation. Where a clipmap chunk aligns 1:1 with one of the model's mip chunks, the world cell references the model's chunk by handle (one copy in RAM and VRAM, the instancing win). Where the model overlaps terrain or another stamp, the cell bakes a composite chunk.
 - Editing a stamped instance triggers copy-on-write on the affected chunks for that instance.
 - Placement is translation + chunk-snap only. Arbitrary rotation would lose the instance (different voxel grid per placement); 90° rotations are possible via separately cached rotated variants.
 
-## GPU Memory
+## GPU Memory (WIP)
 
 - Chunks live in a pool with a free list, since chunk size varies a lot.
 - Chunk offset table maps the u16 handle to the actual memory offset.
@@ -182,7 +182,7 @@ Models are precomputed voxelized assets, stored once and stamped many times.
 - Node types are `bytemuck::Pod` so serialization is raw `memcpy` with no per-field encoding.
 - Dirty tracking: only chunks modified since last frame are re-uploaded.
 
-# Rendering
+# Rendering (WIP)
 
 ## Ray Tracing
 
@@ -197,7 +197,7 @@ Models are precomputed voxelized assets, stored once and stamped many times.
 - Camera is integer chunk coords plus a chunk-local f32 offset. f32 is enough for all traversal math.
 - LOD-aware shape coverage skips sub-voxel detail at coarse levels.
 
-## Per-Face Lighting
+## Per-Face Lighting (WIP)
 
 Lighting is cached per voxel face in a GPU hashmap. Three passes, so reads and writes can't race and shadow rays can batch:
 
@@ -252,7 +252,7 @@ generation     u8     // compared against a global frame counter, stale entries 
 emissive_ids   u8;4   // indices into the emissive pool (0 means empty)
 ```
 
-### Emissive Pool
+### Emissive Pool (WIP)
 
 - Global pool of up to 255 discovered emissive voxels.
 - Whole pool is 255 * 8 = 2040 bytes. Fits in L1, stays resident during shading.
@@ -304,7 +304,7 @@ Entry (8 bytes):
 
 Each importer voxelizes its source into a Model (see above) and serializes to `.rvox`. Models are then stamped into the world rather than imported directly into clipmap chunks.
 
-## Minecraft (.mca)
+## Minecraft (.mca) (WIP)
 
 - Each block ID becomes one material in the chunk LUT.
 - Each block is 16^3 voxels of one material, which lines up exactly with one Level-1 cell.
