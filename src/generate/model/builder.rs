@@ -61,9 +61,7 @@ impl ModelBuilder {
 			})
 			.collect();
 
-		let mut model = Model { chunks, bounds };
-		model.build_mip_pyramid();
-		model
+		Model { chunks, bounds }
 	}
 }
 

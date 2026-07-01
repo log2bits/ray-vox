@@ -1,6 +1,5 @@
 use ray_vox::chunk::{Child, Chunk};
 use ray_vox::generate::model::Model;
-use ray_vox::util::types::LodLevel;
 
 const FILE_HEADER_BYTES: u64 = 4 + 4 + 12 + 12 + 4;
 const CHUNK_ID_BYTES: u64 = 12 + 4;
@@ -26,10 +25,10 @@ fn main() -> anyhow::Result<()> {
 	let mut leaf_bytes: u64 = 0;
 	let mut palette_bytes: u64 = 0;
 	let mut indices_bytes: u64 = 0;
-	let mut per_chunk_meta: u64 = 0;
+	let mut per_chunk_meta_bytes: u64 = 0;
 
-	let mut actual_mat_entries: u64 = 0;
-	let mut naive_mat_entries: u64 = 0;
+	let mut actual_material_entries: u64 = 0;
+	let mut naive_material_entries: u64 = 0;
 	let mut naive_indices_bytes: u64 = 0;
 
 	let mut actual_interior_nodes: u64 = 0;
@@ -37,10 +36,7 @@ fn main() -> anyhow::Result<()> {
 	let mut naive_interior_refs: u64 = 0;
 	let mut naive_leaf_refs: u64 = 0;
 
-	let mut per_lod: [(u64, u64, u64, u64, u64, u64); LodLevel::LEVELS as usize] =
-		[(0, 0, 0, 0, 0, 0); LodLevel::LEVELS as usize];
-
-	for (id, chunk) in &model.chunks {
+	for chunk in model.chunks.values() {
 		let interior = INTERIOR_NODE_BYTES * chunk.interior_nodes.len() as u64;
 		let leaf = LEAF_NODE_BYTES * chunk.leaf_nodes.len() as u64;
 		let palette = MATERIAL_ENTRY_BYTES * chunk.materials.lut.values.len() as u64;
@@ -51,17 +47,9 @@ fn main() -> anyhow::Result<()> {
 		leaf_bytes += leaf;
 		palette_bytes += palette;
 		indices_bytes += indices;
-		per_chunk_meta += meta;
+		per_chunk_meta_bytes += meta;
 
-		let slot = &mut per_lod[u8::from(id.lod) as usize];
-		slot.0 += 1;
-		slot.1 += meta;
-		slot.2 += interior;
-		slot.3 += leaf;
-		slot.4 += palette;
-		slot.5 += indices;
-
-		actual_mat_entries += chunk.materials.indices.len as u64;
+		actual_material_entries += chunk.materials.indices.len as u64;
 
 		let mut chunk_naive_entries: u64 = 0;
 		for node in &chunk.interior_nodes {
@@ -70,7 +58,7 @@ fn main() -> anyhow::Result<()> {
 		for leaf in &chunk.leaf_nodes {
 			chunk_naive_entries += leaf.occupancy.count() as u64;
 		}
-		naive_mat_entries += chunk_naive_entries;
+		naive_material_entries += chunk_naive_entries;
 
 		let bits = chunk.materials.indices.bits as u64;
 		let naive_words = (chunk_naive_entries * bits + 31) / 32;
@@ -78,12 +66,12 @@ fn main() -> anyhow::Result<()> {
 
 		actual_interior_nodes += chunk.interior_nodes.len() as u64;
 		actual_leaf_nodes += chunk.leaf_nodes.len() as u64;
-		let (ni, nl) = count_tree_refs(chunk);
-		naive_interior_refs += ni;
-		naive_leaf_refs += nl;
+		let (interior_refs, leaf_refs) = count_tree_refs(chunk);
+		naive_interior_refs += interior_refs;
+		naive_leaf_refs += leaf_refs;
 	}
 
-	let metadata_bytes = FILE_HEADER_BYTES + per_chunk_meta;
+	let metadata_bytes = FILE_HEADER_BYTES + per_chunk_meta_bytes;
 	let materials_bytes = palette_bytes + indices_bytes;
 	let accounted = metadata_bytes + interior_bytes + leaf_bytes + materials_bytes;
 
@@ -95,12 +83,12 @@ fn main() -> anyhow::Result<()> {
 	println!("chunks: {}\n", model.chunks.len());
 
 	let total = accounted as f64;
-	let pct = |b: u64| 100.0 * b as f64 / total;
+	let pct = |bytes: u64| 100.0 * bytes as f64 / total;
 
 	println!("breakdown:");
 	println!(
 		"  metadata        {:>12} bytes  {:>6.2}%   (file hdr {} + per-chunk hdr/id {})",
-		metadata_bytes, pct(metadata_bytes), FILE_HEADER_BYTES, per_chunk_meta,
+		metadata_bytes, pct(metadata_bytes), FILE_HEADER_BYTES, per_chunk_meta_bytes,
 	);
 	println!("  interior nodes  {:>12} bytes  {:>6.2}%", interior_bytes, pct(interior_bytes));
 	println!("  leaf nodes      {:>12} bytes  {:>6.2}%", leaf_bytes, pct(leaf_bytes));
@@ -117,16 +105,16 @@ fn main() -> anyhow::Result<()> {
 		indices_bytes, pct(indices_bytes),
 	);
 
-	let saved_entries = naive_mat_entries.saturating_sub(actual_mat_entries);
+	let saved_entries = naive_material_entries.saturating_sub(actual_material_entries);
 	let saved_bytes = naive_indices_bytes.saturating_sub(indices_bytes);
 	let naive_file = on_disk + saved_bytes;
 	println!("\nexact-run material dedup:");
 	println!(
 		"  material entries:  {} actual vs {} naive  ({:.2}x sharing, {:.2}% removed)",
-		actual_mat_entries,
-		naive_mat_entries,
-		naive_mat_entries as f64 / actual_mat_entries.max(1) as f64,
-		100.0 * saved_entries as f64 / naive_mat_entries.max(1) as f64,
+		actual_material_entries,
+		naive_material_entries,
+		naive_material_entries as f64 / actual_material_entries.max(1) as f64,
+		100.0 * saved_entries as f64 / naive_material_entries.max(1) as f64,
 	);
 	println!(
 		"  indices bytes:     {} actual vs {} naive  (saved {} bytes = {:.2} MB)",
@@ -144,10 +132,10 @@ fn main() -> anyhow::Result<()> {
 
 	let naive_interior_bytes = naive_interior_refs * INTERIOR_NODE_BYTES;
 	let naive_leaf_bytes = naive_leaf_refs * LEAF_NODE_BYTES;
-	let saved_int_bytes = naive_interior_bytes.saturating_sub(interior_bytes);
+	let saved_interior_bytes = naive_interior_bytes.saturating_sub(interior_bytes);
 	let saved_leaf_bytes = naive_leaf_bytes.saturating_sub(leaf_bytes);
-	let saved_node_bytes = saved_int_bytes + saved_leaf_bytes;
-	let naive_file_node_dag = on_disk + saved_node_bytes;
+	let saved_node_bytes = saved_interior_bytes + saved_leaf_bytes;
+	let naive_file_with_node_dag = on_disk + saved_node_bytes;
 	println!("\nnode-level DAG dedup (subtree sharing):");
 	println!(
 		"  interior nodes: {} unique vs {} references  ({:.2}x sharing, {:.2}% removed)",
@@ -172,22 +160,9 @@ fn main() -> anyhow::Result<()> {
 	println!(
 		"  file size:      {:.2} MB actual vs {:.2} MB without node DAG  ({:.2}x reduction overall)",
 		on_disk as f64 / 1_048_576.0,
-		naive_file_node_dag as f64 / 1_048_576.0,
-		naive_file_node_dag as f64 / on_disk.max(1) as f64,
+		naive_file_with_node_dag as f64 / 1_048_576.0,
+		naive_file_with_node_dag as f64 / on_disk.max(1) as f64,
 	);
-
-	println!("\nper LOD (chunks | metadata | interior | leaf | palette | indices):");
-	for level in 0..LodLevel::LEVELS {
-		let s = per_lod[level as usize];
-		if s.0 == 0 {
-			continue;
-		}
-		let lod_total = s.1 + s.2 + s.3 + s.4 + s.5;
-		println!(
-			"  LOD {:>2}  {:>5} chunks  {:>10} B  ({:>5.2}% of file)  meta {:>8}  int {:>10}  leaf {:>10}  pal {:>8}  idx {:>10}",
-			level, s.0, lod_total, pct(lod_total), s.1, s.2, s.3, s.4, s.5,
-		);
-	}
 
 	Ok(())
 }

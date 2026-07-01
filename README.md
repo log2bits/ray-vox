@@ -112,11 +112,11 @@ Two-tier dedup at emit time:
 1. **Full-run exact match** via a hash-and-verify index. If an identical run was emitted before, the new node points at the same offset.
 2. **Overlap-extend.** If the tail of the materials array matches the head of the new run, only the missing suffix is appended and the offset points back into the overlap.
 
-Collapses the materials slab to near-zero for uniform-material regions — ~99% reduction on a single-material r=128 sphere.
+Collapses the materials slab to near-zero for uniform-material regions. About 99% reduction on a single-material r=128 sphere.
 
 ## Editing
 
-- Chunks are edited CPU-side. Once uploaded to the GPU they are immutable — a re-edit rebuilds the affected chunks on the CPU and re-uploads.
+- Chunks are edited CPU-side. Once uploaded to the GPU they are immutable. Re-editing rebuilds the affected chunks on the CPU and re-uploads them.
 - Two edit kinds:
   - **Single-voxel**: a `(path, material)` pair. Path is u32, four 6-bit slot indices; a slot of 0 terminates early.
   - **Volume**: a shape with a world-space AABB and a per-cell `classify(lo, hi, depth) → Passthrough | Fill(m) | Subdivide`. Cost is resolution-adaptive: a big uniform region collapses to one Fill without visiting every voxel it covers. A filled sphere covering millions of voxels only recurses at the boundary.
@@ -149,7 +149,7 @@ Collapses the materials slab to near-zero for uniform-material regions — ~99% 
 
 - Roughness and metallic share one byte. High bit is metallic, low 7 bits are roughness (0 = mirror, 127 = fully diffuse).
 - Scattering and absorption describe participating media. Scattering controls how often rays bounce inside the medium. Absorption controls how much light is lost per unit distance and at which wavelengths, which is what gives deep water its blue-green tint.
-- Anisotropy g is the Henyey-Greenstein phase function parameter. g = 0 scatters evenly in all directions (fog), g > 0 scatters forward (clouds). Clouds without forward scattering look flat and wrong — the bright halo around clouds when the sun is behind them comes entirely from this.
+- Anisotropy g is the Henyey-Greenstein phase function parameter. g = 0 scatters evenly in all directions (fog), g > 0 scatters forward (clouds). Clouds without forward scattering look flat and wrong. The bright halo around clouds when the sun is behind them comes entirely from this.
 - Non-volumetric materials zero out scattering, absorption, and g. They're just ignored.
 - 4 bits are left unused in the voxel format, reserved for future use.
 
@@ -292,7 +292,7 @@ Once the chunk grid isn't fixed at load time, memory management gets a proper po
 - GPU side is one flat contiguous buffer. Upload serializes the scattered heap allocations into the packed GPU layout.
 - On discrete GPU: CPU → staging buffer → VRAM via PCIe.
 - On unified memory: CPU → GPU-visible buffer directly, driver elides the transfer.
-- wgpu's `StagingBelt` abstracts both paths — same code runs optimally on all hardware.
+- wgpu's `StagingBelt` abstracts both paths, so the same code runs optimally on all hardware.
 - Node types are `bytemuck::Pod` so serialization is raw `memcpy` with no per-field encoding.
 - Dirty tracking: only chunks modified since last frame are re-uploaded.
 
