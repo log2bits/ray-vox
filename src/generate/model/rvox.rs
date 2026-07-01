@@ -1,10 +1,10 @@
 use super::Model;
 use crate::chunk::Chunk;
-use crate::util::types::{Aabb, ChunkId, LodLevel, WorldPos};
+use crate::util::types::{Aabb, ChunkId, WorldPos};
 use std::io::{self, Read, Write};
 
 const MAGIC: &[u8; 4] = b"RVOX";
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 
 #[derive(Debug)]
 pub enum RvoxError {
@@ -37,7 +37,7 @@ impl Model {
 		write_worldpos(w, self.bounds.max)?;
 		write_le(w, self.chunks.len() as u32)?;
 		for (id, chunk) in &self.chunks {
-			write_chunk_id(w, *id)?;
+			write_worldpos(w, id.origin)?;
 			chunk.write_bytes(w)?;
 		}
 		Ok(())
@@ -59,30 +59,17 @@ impl Model {
 
 		let mut model = Model::empty(Aabb::new(min, max));
 		for _ in 0..chunk_count {
-			let id = read_chunk_id(r)?;
+			let origin = read_worldpos(r)?;
 			let chunk = Chunk::read_bytes(r)?;
-			model.chunks.insert(id, chunk);
+			model.chunks.insert(ChunkId::new(origin), chunk);
 		}
 		Ok(model)
 	}
 }
 
-// Header and chunk-id fields are written little-endian. Chunk node/material data
-// is `bytemuck`-cast and written native-endian — these files are only portable
-// across little-endian hosts (fine in practice for x86 and aarch64).
-
-fn write_chunk_id<W: Write>(w: &mut W, id: ChunkId) -> Result<(), RvoxError> {
-	write_worldpos(w, id.origin)?;
-	w.write_all(&[u8::from(id.lod), 0, 0, 0])?;
-	Ok(())
-}
-
-fn read_chunk_id<R: Read>(r: &mut R) -> Result<ChunkId, RvoxError> {
-	let origin = read_worldpos(r)?;
-	let mut lod_bytes = [0u8; 4];
-	r.read_exact(&mut lod_bytes)?;
-	Ok(ChunkId::new(origin, LodLevel::new(lod_bytes[0])))
-}
+// Header fields are written little-endian. Chunk node/material bytes are
+// bytemuck-cast and written native-endian, so files are only portable across
+// little-endian hosts (fine in practice for x86 and aarch64).
 
 fn write_worldpos<W: Write>(w: &mut W, p: WorldPos) -> Result<(), RvoxError> {
 	write_le(w, p.x() as u32)?;

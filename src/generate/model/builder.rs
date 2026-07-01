@@ -3,7 +3,7 @@ use crate::Chunk;
 use crate::chunk::edit::{EditPacket, Path};
 use crate::chunk::material::Material;
 use crate::chunk::sources::DiscreteSource;
-use crate::util::types::{Aabb, ChunkId, LodLevel, WorldPos};
+use crate::util::types::{Aabb, ChunkId, WorldPos};
 use ahash::AHasher;
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -19,7 +19,7 @@ pub struct WorldEdit {
 
 pub struct ModelBuilder {
 	// Sharded packet map. Each shard is a small HashMap behind its own Mutex,
-	// so concurrent `add` calls only contend when they hash to the same shard.
+	// so concurrent add calls only contend when they hash to the same shard.
 	shards: Box<[Mutex<HashMap<ChunkId, EditPacket>>]>,
 	bounds: AtomicBounds,
 }
@@ -35,8 +35,8 @@ impl ModelBuilder {
 
 	pub fn add(&self, edit: WorldEdit) {
 		self.bounds.observe(edit.pos);
-		let chunk_id = edit.pos.chunk_id(LodLevel::FINEST);
-		let local = edit.pos.chunk_pos(chunk_id.origin, LodLevel::FINEST);
+		let chunk_id = edit.pos.chunk_id();
+		let local = edit.pos.chunk_pos(chunk_id.origin);
 		let shard_idx = shard_of(chunk_id, self.shards.len());
 		let mut shard = self.shards[shard_idx].lock().unwrap();
 		shard.entry(chunk_id)

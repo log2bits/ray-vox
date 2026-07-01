@@ -1,215 +1,142 @@
-pub mod chunk_pool;
-pub mod clipmap;
 pub mod pbr;
 
 #[cfg(test)]
 mod tests;
 
 use crate::Chunk;
-use crate::chunk::build::{build_chunk, CHUNK_SIDE};
-use crate::chunk::sources::{CompositeSource, LocalEdit};
 use crate::generate::Edit;
 use crate::util::Lut;
-use crate::util::types::{ChunkHandle, ChunkId};
-use chunk_pool::ChunkPool;
-use clipmap::{Clipmap, RemapOp, slots_for};
+use crate::util::types::{Aabb, ChunkId, CHUNK_SIZE, WorldPos};
 pub use pbr::Pbr;
-use rayon::prelude::*;
-use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-fn dedup_pending_remap(pending: &mut Vec<RemapOp>) {
-	if pending.len() < 2 {
-		return;
-	}
-	let mut last: HashMap<ChunkHandle, u32> = HashMap::with_capacity(pending.len());
-	for (i, op) in pending.iter().enumerate() {
-		last.insert(op.handle(), i as u32);
-	}
-	let mut i = 0u32;
-	pending.retain(|op| {
-		let keep = last.get(&op.handle()) == Some(&i);
-		i += 1;
-		keep
-	});
-}
-
-pub fn bake_pure(chunk_id: ChunkId, edits: &[Arc<dyn Edit>]) -> Chunk {
-	let locals: Vec<Box<dyn LocalEdit + '_>> = edits.iter()
-		.filter_map(|e| e.make_local(chunk_id))
-		.collect();
-	if locals.is_empty() {
-		return Chunk::new();
-	}
-	let composite = CompositeSource::new(&locals, CHUNK_SIDE);
-	build_chunk(&composite)
-}
-
-struct BakeJob {
-	handle: ChunkHandle,
-	chunk_id: ChunkId,
-	edit_ids: Vec<u32>,
-	edit_refs: Vec<Arc<dyn Edit>>,
-}
-
+// A fixed 3D grid of chunks in world space. The grid covers
+// `[origin, origin + chunk_grid_dim * CHUNK_SIZE)` along each axis.
+// Chunk slots are either baked (`Some`) or empty air (`None`).
 pub struct World {
+	pub chunk_grid_dim: [u32; 3],
+	pub origin: WorldPos,
 	pub edits: Vec<Arc<dyn Edit>>,
-	pub by_handle: HashMap<ChunkHandle, Vec<u32>>,
-	pub needs_rebake: HashSet<ChunkHandle>,
-	pub chunk_pool: ChunkPool,
-	pub clipmap: Clipmap,
+	pub chunks: Vec<Option<Chunk>>,
 	pub pbr_lut: Lut<Pbr>,
 }
 
 impl World {
-	pub fn new() -> Self {
+	pub fn new(chunk_grid_dim: [u32; 3]) -> Self {
+		Self::with_origin(chunk_grid_dim, WorldPos::new(0, 0, 0))
+	}
+
+	pub fn with_origin(chunk_grid_dim: [u32; 3], origin: WorldPos) -> Self {
+		let len = chunk_grid_dim[0] as usize
+			* chunk_grid_dim[1] as usize
+			* chunk_grid_dim[2] as usize;
+		let mut chunks = Vec::with_capacity(len);
+		chunks.resize_with(len, || None);
 		Self {
+			chunk_grid_dim,
+			origin,
 			edits: Vec::new(),
-			by_handle: HashMap::new(),
-			needs_rebake: HashSet::new(),
-			chunk_pool: ChunkPool::new(),
-			clipmap: Clipmap::new(),
+			chunks,
 			pbr_lut: Lut::new(),
 		}
 	}
 
-	pub fn apply_edit(&mut self, edit: Arc<dyn Edit>) -> u32 {
+	pub fn chunk_slot_count(&self) -> usize {
+		self.chunks.len()
+	}
+
+	// Flatten a 3D grid position into the storage index. Returns None if the
+	// position is out of bounds.
+	pub fn slot_index(&self, grid_pos: [u32; 3]) -> Option<usize> {
+		if grid_pos[0] >= self.chunk_grid_dim[0]
+			|| grid_pos[1] >= self.chunk_grid_dim[1]
+			|| grid_pos[2] >= self.chunk_grid_dim[2]
+		{
+			return None;
+		}
+		let [gx, gy, gz] = grid_pos;
+		let [dx, dy, _] = self.chunk_grid_dim;
+		Some(gx as usize + gy as usize * dx as usize + gz as usize * dx as usize * dy as usize)
+	}
+
+	pub fn slot_grid_pos(&self, index: usize) -> [u32; 3] {
+		let [dx, dy, _] = self.chunk_grid_dim;
+		let dx = dx as usize;
+		let dy = dy as usize;
+		let z = index / (dx * dy);
+		let rem = index % (dx * dy);
+		let y = rem / dx;
+		let x = rem % dx;
+		[x as u32, y as u32, z as u32]
+	}
+
+	pub fn chunk_world_origin(&self, grid_pos: [u32; 3]) -> WorldPos {
+		WorldPos::new(
+			self.origin.x() + grid_pos[0] as i32 * CHUNK_SIZE,
+			self.origin.y() + grid_pos[1] as i32 * CHUNK_SIZE,
+			self.origin.z() + grid_pos[2] as i32 * CHUNK_SIZE,
+		)
+	}
+
+	pub fn chunk_id_at(&self, grid_pos: [u32; 3]) -> ChunkId {
+		ChunkId::new(self.chunk_world_origin(grid_pos))
+	}
+
+	pub fn chunk_at(&self, grid_pos: [u32; 3]) -> Option<&Chunk> {
+		self.slot_index(grid_pos).and_then(|i| self.chunks[i].as_ref())
+	}
+
+	pub fn set_chunk(&mut self, grid_pos: [u32; 3], chunk: Chunk) {
+		if let Some(i) = self.slot_index(grid_pos) {
+			self.chunks[i] = if chunk.is_empty() { None } else { Some(chunk) };
+		}
+	}
+
+	pub fn clear_chunk(&mut self, grid_pos: [u32; 3]) {
+		if let Some(i) = self.slot_index(grid_pos) {
+			self.chunks[i] = None;
+		}
+	}
+
+	// Apply an edit to every grid cell whose chunk AABB overlaps its bounds,
+	// baking each affected chunk in place.
+	pub fn apply_edit(&mut self, edit: Arc<dyn Edit>) {
 		let bounds = edit.bounds();
-		let id = self.edits.len() as u32;
-		let camera_pos = self.clipmap.camera_pos;
+		let [lo, hi] = self.grid_range_for_bounds(bounds);
+		for gz in lo[2]..hi[2] {
+			for gy in lo[1]..hi[1] {
+				for gx in lo[0]..hi[0] {
+					let grid_pos = [gx, gy, gz];
+					let chunk_id = self.chunk_id_at(grid_pos);
+					let base = self.chunk_at(grid_pos).cloned().unwrap_or_else(Chunk::new);
+					let baked = edit.apply(chunk_id, base);
+					self.set_chunk(grid_pos, baked);
+				}
+			}
+		}
 		self.edits.push(edit);
+	}
 
-		for chunk_id in slots_for(camera_pos) {
-			if !chunk_id.aabb().intersects(&bounds) {
-				continue;
-			}
-			let handle = chunk_id.handle();
-			match self.clipmap.chunk_id_of(handle) {
-				Some(resident) if resident == chunk_id => {
-					self.by_handle.entry(handle).or_default().push(id);
-					self.needs_rebake.insert(handle);
-				}
-				_ => {
-					self.clipmap.pending_remap.push(RemapOp::Add(handle, chunk_id));
-				}
-			}
+	// The rectangular subset of grid cells whose AABBs intersect `bounds`,
+	// clamped to the grid. Returns `[lo, hi)` exclusive-upper ranges.
+	fn grid_range_for_bounds(&self, bounds: Aabb) -> [[u32; 3]; 2] {
+		let mut lo = [0u32; 3];
+		let mut hi = [0u32; 3];
+		for axis in 0..3 {
+			let axis_lo = bounds.min[axis] - self.origin[axis];
+			let axis_hi = bounds.max[axis] - self.origin[axis];
+			let cell_lo = axis_lo.div_euclid(CHUNK_SIZE).max(0);
+			let cell_hi_inclusive = (axis_hi - 1).div_euclid(CHUNK_SIZE);
+			let cell_hi = (cell_hi_inclusive + 1).max(0);
+			lo[axis] = (cell_lo as u32).min(self.chunk_grid_dim[axis]);
+			hi[axis] = (cell_hi as u32).min(self.chunk_grid_dim[axis]);
 		}
-
-		id
+		[lo, hi]
 	}
+}
 
-	pub fn bake(&self, handle: ChunkHandle) -> Chunk {
-		let chunk_id = match self.clipmap.chunk_id_of(handle) {
-			Some(id) => id,
-			None => return Chunk::new(),
-		};
-		let ids = self.by_handle.get(&handle).cloned().unwrap_or_default();
-		bake_pure(chunk_id, &self.edit_refs(&ids))
-	}
-
-	fn edit_refs(&self, ids: &[u32]) -> Vec<Arc<dyn Edit>> {
-		ids.iter().map(|&i| self.edits[i as usize].clone()).collect()
-	}
-
-	fn edit_ids_for(&self, aabb: &crate::util::types::Aabb) -> Vec<u32> {
-		self.edits.iter().enumerate()
-			.filter_map(|(i, e)| e.bounds().intersects(aabb).then_some(i as u32))
-			.collect()
-	}
-
-	pub fn drive_remaps(&mut self, budget: usize) {
-		dedup_pending_remap(&mut self.clipmap.pending_remap);
-		let add_jobs = self.collect_add_jobs(budget);
-		let remaining = budget - add_jobs.len();
-		let rebake_jobs = self.collect_rebake_jobs(remaining);
-
-		let jobs: Vec<BakeJob> = add_jobs.into_iter().chain(rebake_jobs).collect();
-		let results: Vec<(BakeJob, Chunk)> = jobs.into_par_iter()
-			.map(|job| {
-				let chunk = bake_pure(job.chunk_id, &job.edit_refs);
-				(job, chunk)
-			})
-			.collect();
-
-		for (job, chunk) in results {
-			self.needs_rebake.remove(&job.handle);
-			let already_resident = self.clipmap.chunk_id_of(job.handle) == Some(job.chunk_id);
-			if chunk.is_empty() {
-				if already_resident {
-					self.clipmap.evict(job.handle);
-					self.chunk_pool.remove(job.handle);
-					self.by_handle.remove(&job.handle);
-				}
-				continue;
-			}
-			if !already_resident && self.clipmap.chunk_id_of(job.handle).is_some() {
-				self.clipmap.evict(job.handle);
-				self.chunk_pool.remove(job.handle);
-			}
-			self.clipmap.assign(job.handle, job.chunk_id);
-			self.by_handle.insert(job.handle, job.edit_ids);
-			self.chunk_pool.insert(job.handle, chunk);
-		}
-	}
-
-	fn collect_add_jobs(&mut self, budget: usize) -> Vec<BakeJob> {
-		let mut jobs: Vec<BakeJob> = Vec::with_capacity(budget.min(64));
-		while jobs.len() < budget {
-			let op = match self.clipmap.pending_remap.pop() {
-				Some(op) => op,
-				None => break,
-			};
-			match op {
-				RemapOp::Add(handle, chunk_id) => {
-					if self.clipmap.chunk_id_of(handle) == Some(chunk_id) {
-						continue;
-					}
-					let edit_ids = self.edit_ids_for(&chunk_id.aabb());
-					if edit_ids.is_empty() {
-						continue;
-					}
-					let edit_refs = self.edit_refs(&edit_ids);
-					jobs.push(BakeJob { handle, chunk_id, edit_ids, edit_refs });
-				}
-				RemapOp::Delete(handle) => {
-					self.clipmap.evict(handle);
-					self.chunk_pool.remove(handle);
-					self.by_handle.remove(&handle);
-					self.needs_rebake.remove(&handle);
-				}
-			}
-		}
-		jobs
-	}
-
-	fn collect_rebake_jobs(&self, budget: usize) -> Vec<BakeJob> {
-		self.needs_rebake.iter().take(budget).filter_map(|&handle| {
-			let chunk_id = self.clipmap.chunk_id_of(handle)?;
-			let edit_ids = self.by_handle.get(&handle).cloned().unwrap_or_default();
-			let edit_refs = self.edit_refs(&edit_ids);
-			Some(BakeJob { handle, chunk_id, edit_ids, edit_refs })
-		}).collect()
-	}
-
-	pub fn process_remap(&mut self, op: &RemapOp) {
-		self.clipmap.apply_remap(op);
-		self.chunk_pool.apply_remap(op);
-		self.apply_remap_to_edits(op);
-	}
-
-	fn apply_remap_to_edits(&mut self, op: &RemapOp) {
-		match op {
-			RemapOp::Add(handle, chunk_id) => {
-				let hits = self.edit_ids_for(&chunk_id.aabb());
-				if hits.is_empty() {
-					self.by_handle.remove(handle);
-				} else {
-					self.by_handle.insert(*handle, hits);
-				}
-			}
-			RemapOp::Delete(handle) => {
-				self.by_handle.remove(handle);
-			}
-		}
+impl Default for World {
+	fn default() -> Self {
+		Self::new([1, 1, 1])
 	}
 }

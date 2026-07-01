@@ -16,20 +16,20 @@ impl Sphere {
 		Self { center, radius, material }
 	}
 
+	// Convert this sphere into chunk-local coordinates. Returns None when the
+	// sphere has non-positive radius and therefore covers no voxels.
 	pub fn local(&self, chunk: ChunkId) -> Option<LocalSphere> {
-		let voxel_size = chunk.lod.voxel_size();
-		let center = [
-			(self.center.x() - chunk.origin.x()) / voxel_size,
-			(self.center.y() - chunk.origin.y()) / voxel_size,
-			(self.center.z() - chunk.origin.z()) / voxel_size,
-		];
-		let radius = self.radius / voxel_size;
-		if radius <= 0 {
+		if self.radius <= 0 {
 			return None;
 		}
+		let center = [
+			self.center.x() - chunk.origin.x(),
+			self.center.y() - chunk.origin.y(),
+			self.center.z() - chunk.origin.z(),
+		];
 		Some(LocalSphere {
 			center,
-			radius_squared: radius * radius,
+			radius_squared: self.radius * self.radius,
 			material: self.material,
 		})
 	}

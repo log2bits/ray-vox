@@ -2,7 +2,7 @@ use ray_vox::chunk::build;
 use ray_vox::chunk::material::Material;
 use ray_vox::generate::volume::sphere::Sphere;
 use ray_vox::generate::Edit;
-use ray_vox::util::types::{ChunkId, LodLevel, WorldPos};
+use ray_vox::util::types::{ChunkId, WorldPos};
 use ray_vox::Chunk;
 use std::time::{Duration, Instant};
 
@@ -24,7 +24,7 @@ fn summarize(name: &str, mut samples: Vec<Duration>) {
 
 fn main() {
 	let stone = Material::from(0x80808040);
-	let chunk_id = ChunkId::new(WorldPos::new(0, 0, 0), LodLevel::FINEST);
+	let chunk_id = ChunkId::new(WorldPos::new(0, 0, 0));
 	let center = WorldPos::new(128, 128, 128);
 
 	let mut t_build = Vec::with_capacity(ITERS);

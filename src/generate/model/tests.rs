@@ -3,7 +3,7 @@ use crate::chunk::edit::{EditPacket, Path};
 use crate::chunk::material::Material;
 use crate::chunk::sources::DiscreteSource;
 use crate::Chunk;
-use crate::util::types::{Aabb, ChunkId, ChunkPos, LodLevel, WorldPos};
+use crate::util::types::{Aabb, ChunkId, ChunkPos, WorldPos};
 
 fn mat(v: u32) -> Material { Material::from(v) }
 
@@ -22,7 +22,7 @@ fn rvox_round_trip_preserves_voxel_content() {
 	let bounds = Aabb::new(WorldPos::new(0, 0, 0), WorldPos::new(256, 256, 256));
 	let mut original = Model::empty(bounds);
 	original.chunks.insert(
-		ChunkId::new(WorldPos::new(0, 0, 0), LodLevel::FINEST),
+		ChunkId::new(WorldPos::new(0, 0, 0)),
 		fine_chunk,
 	);
 	let original_count = original.chunks.len();
@@ -91,7 +91,7 @@ fn import_vox_from_synthetic_bytes() {
 	let model = crate::import::vox::import_vox(&bytes).expect("import");
 	assert!(model.chunks.len() > 0, "model should have chunks");
 
-	let finest_id = ChunkId::new(WorldPos::new(0, 0, 0), LodLevel::FINEST);
+	let finest_id = ChunkId::new(WorldPos::new(0, 0, 0));
 	let fine = model.chunks.get(&finest_id).expect("finest chunk");
 	let red = fine.voxel_at(ChunkPos::new(1, 2, 3));
 	let blue = fine.voxel_at(ChunkPos::new(5, 6, 7));

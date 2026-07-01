@@ -5,7 +5,7 @@ use super::sources::{DiscreteSource, Overlay};
 use super::Chunk;
 use crate::generate::volume::sphere::Sphere;
 use crate::generate::Edit;
-use crate::util::types::{ChunkId, ChunkPos, LodLevel, Mask64, WorldPos};
+use crate::util::types::{ChunkId, ChunkPos, Mask64, WorldPos};
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 use std::collections::HashMap;
@@ -282,7 +282,7 @@ fn deep_edit_into_demoted_leaf_region() {
 #[test]
 fn sphere_paints_inside_and_leaves_outside_air() {
 	let m = mat(0x778899AA);
-	let chunk_id = ChunkId::new(WorldPos::new(0, 0, 0), LodLevel::FINEST);
+	let chunk_id = ChunkId::new(WorldPos::new(0, 0, 0));
 	let chunk = Sphere::new(WorldPos::new(128, 128, 128), 20, m).apply(chunk_id, Chunk::new());
 
 	for (offset, expected) in [
@@ -308,7 +308,7 @@ fn sphere_carve_leaves_air_hole_in_filled_chunk() {
 	fill.push(Path::from(0u32), stone);
 	let solid = bake_one(Chunk::new(), fill);
 
-	let chunk_id = ChunkId::new(WorldPos::new(0, 0, 0), LodLevel::FINEST);
+	let chunk_id = ChunkId::new(WorldPos::new(0, 0, 0));
 	let chunk = Sphere::new(WorldPos::new(128, 128, 128), 20, Material::air())
 		.apply(chunk_id, solid);
 
@@ -470,7 +470,7 @@ fn property_multi_packet_mixed_depths() {
 fn overlay_last_writer_wins_for_two_overlapping_spheres() {
 	let red = mat(0x11111140);
 	let blue = mat(0x22222240);
-	let chunk_id = ChunkId::new(WorldPos::new(0, 0, 0), LodLevel::FINEST);
+	let chunk_id = ChunkId::new(WorldPos::new(0, 0, 0));
 	let s1 = Sphere::new(WorldPos::new(100, 128, 128), 40, red).local(chunk_id).unwrap();
 	let s2 = Sphere::new(WorldPos::new(156, 128, 128), 40, blue).local(chunk_id).unwrap();
 	let chunk = build_chunk(&Overlay::new(s1, s2));
@@ -505,7 +505,7 @@ fn edit_sphere_over_detailed_base_preserves_untouched_voxels() {
 	];
 	let pre: Vec<_> = outside_samples.iter().map(|p| (*p, base.voxel_at(*p))).collect();
 
-	let chunk_id = ChunkId::new(WorldPos::new(0, 0, 0), LodLevel::FINEST);
+	let chunk_id = ChunkId::new(WorldPos::new(0, 0, 0));
 	let carved = Sphere::new(WorldPos::new(128, 128, 128), 30, Material::air())
 		.apply(chunk_id, base);
 
