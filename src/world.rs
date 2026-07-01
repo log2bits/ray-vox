@@ -1,24 +1,19 @@
-pub mod pbr;
-
 #[cfg(test)]
 mod tests;
 
 use crate::Chunk;
 use crate::generate::Edit;
-use crate::util::Lut;
 use crate::util::types::{Aabb, ChunkId, CHUNK_SIZE, WorldPos};
-pub use pbr::Pbr;
 use std::sync::Arc;
 
 // A fixed 3D grid of chunks in world space. The grid covers
-// `[origin, origin + chunk_grid_dim * CHUNK_SIZE)` along each axis.
-// Chunk slots are either baked (`Some`) or empty air (`None`).
+// [origin, origin + chunk_grid_dim * CHUNK_SIZE) along each axis.
+// Chunk slots are either baked (Some) or empty air (None).
 pub struct World {
 	pub chunk_grid_dim: [u32; 3],
 	pub origin: WorldPos,
 	pub edits: Vec<Arc<dyn Edit>>,
 	pub chunks: Vec<Option<Chunk>>,
-	pub pbr_lut: Lut<Pbr>,
 }
 
 impl World {
@@ -37,7 +32,6 @@ impl World {
 			origin,
 			edits: Vec::new(),
 			chunks,
-			pbr_lut: Lut::new(),
 		}
 	}
 

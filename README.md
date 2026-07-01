@@ -125,33 +125,14 @@ Collapses the materials slab to near-zero for uniform-material regions. About 99
 
 ## Voxel Format (u32)
 
-| Bits  | Field          | Notes                                     |
-|-------|----------------|-------------------------------------------|
-| 31..8 | RGB            | 24-bit linear RGB, tints the material     |
-| 7..4  | Material index | 0-15, indexes into the PBR material table |
-| 3..0  | Unused         |                                           |
+| Bits  | Field          | Notes                                          |
+|-------|----------------|------------------------------------------------|
+| 31..8 | RGB            | 24-bit linear RGB, tints the material          |
+| 7..4  | Material index | 0-15, reserved for the future PBR table        |
+| 3..0  | Unused         |                                                |
 
 - Voxel value 0 is air. Zero state of every bitpacked array, costs nothing to store.
-- RGB is a tint on top of the material's behavior, not a raw surface color. Two voxels with the same material index but different RGB values give different shades of the same physical behavior. The material table defines how light interacts with the surface; the voxel's RGB just colors it.
-
-## Material Table
-
-16 entries, 8 bytes each, 128 bytes total. Fits permanently in L1.
-
-| Parameter            | Bits | Notes                                       |
-|----------------------|------|---------------------------------------------|
-| Roughness + metallic | 8    | High bit = metallic flag, low 7 = roughness |
-| Emissive strength    | 8    |                                             |
-| Scattering coeff     | 8    | How often rays scatter inside the medium    |
-| Absorption RGB       | 24   | 8 bits per channel                          |
-| IOR                  | 8    | Index of refraction                         |
-| Anisotropy g         | 8    | Phase function for volumetric scatter       |
-
-- Roughness and metallic share one byte. High bit is metallic, low 7 bits are roughness (0 = mirror, 127 = fully diffuse).
-- Scattering and absorption describe participating media. Scattering controls how often rays bounce inside the medium. Absorption controls how much light is lost per unit distance and at which wavelengths, which is what gives deep water its blue-green tint.
-- Anisotropy g is the Henyey-Greenstein phase function parameter. g = 0 scatters evenly in all directions (fog), g > 0 scatters forward (clouds). Clouds without forward scattering look flat and wrong. The bright halo around clouds when the sun is behind them comes entirely from this.
-- Non-volumetric materials zero out scattering, absorption, and g. They're just ignored.
-- 4 bits are left unused in the voxel format, reserved for future use.
+- The bit layout is fixed so `.rvox` files stay stable across engine changes. The material index bits are reserved space for the planned PBR table below; today only the RGB tint is read.
 
 ## Voxel Import: MagicaVoxel (.vox)
 
@@ -249,7 +230,9 @@ Entry (8 bytes):
 
 Beyond the fixed-grid renderer, the world grows to a clipmap so far-away chunks are cheap and the addressable space is unbounded.
 
-- 11 levels (0–10) covering the i32 coord space.
+Once ranges get this big, pure ray tracing stops being the right primary. Even with the coarse occupancy bitmask, a ray that has to trudge across every empty chunk in the frustum before it hits anything is expensive, and the cost scales with view distance rather than with what's actually visible. The plan is to rasterize a depth prepass from a coarse proxy geometry (typically the coarsest LOD chunk faces) and start each pixel's ray from that depth. Every ray then only has to refine the last bit of distance against the fine tree. The tracing techniques below (ancestor stack, coarse occupancy, octant mirroring) apply to that refinement step just as well as to full traversal.
+
+- 11 levels (0-10) covering the i32 coord space.
 - Level 0 is the coarsest, level 10 is the finest. Same convention as the chunk tree.
 - All levels are 8^3 chunks.
 - `chunk_size(d) = 256 * 4^(10 - d)`. At depth 0: 2^28 per chunk, 8 * 2^28 = 2^31 total.
@@ -299,6 +282,25 @@ Once the chunk grid isn't fixed at load time, memory management gets a proper po
 ## Editing After Upload
 
 Today edits are CPU-only. Planned: copy-on-write rebake of only the affected chunks, partial re-upload via the chunk pool's dirty set. Interior LOD material tracking may come back if a clipmap needs it for coarse levels.
+
+## PBR Material Table
+
+The 4-bit material index in the voxel format points here. 16 entries, 8 bytes each, 128 bytes total. Fits permanently in L1.
+
+| Parameter            | Bits | Notes                                       |
+|----------------------|------|---------------------------------------------|
+| Roughness + metallic | 8    | High bit = metallic flag, low 7 = roughness |
+| Emissive strength    | 8    |                                             |
+| Scattering coeff     | 8    | How often rays scatter inside the medium    |
+| Absorption RGB       | 24   | 8 bits per channel                          |
+| IOR                  | 8    | Index of refraction                         |
+| Anisotropy g         | 8    | Phase function for volumetric scatter       |
+
+- The voxel's RGB is a tint on top of the material's behavior, not a raw surface color. Two voxels with the same material index but different RGB give different shades of the same physical behavior. The table defines how light interacts with the surface; the voxel's RGB just colors it.
+- Roughness and metallic share one byte. High bit is metallic, low 7 bits are roughness (0 = mirror, 127 = fully diffuse).
+- Scattering and absorption describe participating media. Scattering controls how often rays bounce inside the medium. Absorption controls how much light is lost per unit distance and at which wavelengths, which is what gives deep water its blue-green tint.
+- Anisotropy g is the Henyey-Greenstein phase function parameter. g = 0 scatters evenly in all directions (fog), g > 0 scatters forward (clouds). Clouds without forward scattering look flat and wrong. The bright halo around clouds when the sun is behind them comes entirely from this.
+- Non-volumetric materials zero out scattering, absorption, and g. They're just ignored.
 
 ## Model Stamping
 

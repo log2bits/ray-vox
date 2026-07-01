@@ -2,9 +2,8 @@ pub mod model;
 pub mod volume;
 
 use crate::chunk::Chunk;
-use crate::chunk::build::CHUNK_SIDE;
 use crate::chunk::sources::{ChunkSource, CompositeSource, LocalEdit, Overlay};
-use crate::util::types::{Aabb, ChunkId};
+use crate::util::types::{Aabb, ChunkId, CHUNK_SIZE};
 
 pub trait Edit: Send + Sync {
 	fn bounds(&self) -> Aabb;
@@ -17,7 +16,7 @@ pub trait Edit: Send + Sync {
 			None => return base,
 		};
 		let locals: [Box<dyn LocalEdit + '_>; 1] = [local];
-		let composite = CompositeSource::new(&locals, CHUNK_SIDE);
+		let composite = CompositeSource::new(&locals, CHUNK_SIZE);
 		let chunk_source = ChunkSource::new(&base);
 		let overlay = Overlay::new(chunk_source, composite);
 		crate::chunk::build::build_chunk(&overlay)

@@ -4,12 +4,8 @@ use crate::chunk::edit::{EditPacket, Path};
 use crate::chunk::material::Material;
 use crate::chunk::sources::DiscreteSource;
 use crate::util::types::{Aabb, ChunkId, WorldPos};
-use ahash::AHasher;
 use rayon::prelude::*;
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicI32, Ordering};
 
 #[derive(Clone, Copy)]
 pub struct WorldEdit {
@@ -17,47 +13,61 @@ pub struct WorldEdit {
 	pub material: Material,
 }
 
+// Collects world-space voxel writes and bakes them into a Model.
+// The builder is single-threaded: callers gather edits (typically via a
+// rayon collect) and hand the finished Vec over to bake().
+#[derive(Default)]
 pub struct ModelBuilder {
-	// Sharded packet map. Each shard is a small HashMap behind its own Mutex,
-	// so concurrent add calls only contend when they hash to the same shard.
-	shards: Box<[Mutex<HashMap<ChunkId, EditPacket>>]>,
-	bounds: AtomicBounds,
+	edits: Vec<WorldEdit>,
 }
 
 impl ModelBuilder {
 	pub fn new() -> Self {
-		let shards = (rayon::current_num_threads().max(1) * 4).next_power_of_two();
-		Self {
-			shards: (0..shards).map(|_| Mutex::new(HashMap::new())).collect(),
-			bounds: AtomicBounds::new(),
-		}
+		Self { edits: Vec::new() }
 	}
 
-	pub fn add(&self, edit: WorldEdit) {
-		self.bounds.observe(edit.pos);
-		let chunk_id = edit.pos.chunk_id();
-		let local = edit.pos.chunk_pos(chunk_id.origin);
-		let shard_idx = shard_of(chunk_id, self.shards.len());
-		let mut shard = self.shards[shard_idx].lock().unwrap();
-		shard.entry(chunk_id)
-			.or_default()
-			.push(Path::from_coords(local, 4), edit.material);
+	pub fn from_edits(edits: Vec<WorldEdit>) -> Self {
+		Self { edits }
+	}
+
+	pub fn push(&mut self, edit: WorldEdit) {
+		self.edits.push(edit);
+	}
+
+	pub fn extend<I: IntoIterator<Item = WorldEdit>>(&mut self, iter: I) {
+		self.edits.extend(iter);
+	}
+
+	pub fn len(&self) -> usize {
+		self.edits.len()
+	}
+
+	pub fn is_empty(&self) -> bool {
+		self.edits.is_empty()
 	}
 
 	pub fn bake(self) -> Model {
-		let bounds = self.bounds.finalize();
-		let by_chunk: HashMap<ChunkId, EditPacket> = self.shards
-			.into_vec()
-			.into_iter()
-			.flat_map(|s| s.into_inner().unwrap().into_iter())
-			.collect();
+		let bounds = bounds_of(&self.edits);
 
-		let chunks: HashMap<ChunkId, Chunk> = by_chunk
+		// Group edits by the chunk they land in. Sequential accumulation
+		// dominates on realistic inputs (millions of tiny hashmap inserts),
+		// then baking each chunk is done in parallel.
+		let mut per_chunk: HashMap<ChunkId, EditPacket> = HashMap::new();
+		for edit in self.edits {
+			let chunk_id = edit.pos.chunk_id();
+			let local = edit.pos.chunk_pos(chunk_id.origin);
+			per_chunk
+				.entry(chunk_id)
+				.or_default()
+				.push(Path::from_coords(local, 4), edit.material);
+		}
+
+		let chunks: HashMap<ChunkId, Chunk> = per_chunk
 			.into_par_iter()
-			.filter_map(|(id, mut packet)| {
+			.filter_map(|(chunk_id, mut packet)| {
 				packet.sort();
 				let chunk = Chunk::new().edit(&DiscreteSource::new(&packet.edits));
-				if chunk.is_empty() { None } else { Some((id, chunk)) }
+				if chunk.is_empty() { None } else { Some((chunk_id, chunk)) }
 			})
 			.collect();
 
@@ -65,72 +75,21 @@ impl ModelBuilder {
 	}
 }
 
-impl Default for ModelBuilder {
-	fn default() -> Self { Self::new() }
-}
-
-struct AtomicBounds {
-	min: [AtomicI32; 3],
-	max: [AtomicI32; 3],
-}
-
-impl AtomicBounds {
-	fn new() -> Self {
-		Self {
-			min: [AtomicI32::new(i32::MAX), AtomicI32::new(i32::MAX), AtomicI32::new(i32::MAX)],
-			max: [AtomicI32::new(i32::MIN), AtomicI32::new(i32::MIN), AtomicI32::new(i32::MIN)],
-		}
-	}
-
-	fn observe(&self, p: WorldPos) {
-		atomic_min(&self.min[0], p.x());
-		atomic_min(&self.min[1], p.y());
-		atomic_min(&self.min[2], p.z());
-		atomic_max(&self.max[0], p.x() + 1);
-		atomic_max(&self.max[1], p.y() + 1);
-		atomic_max(&self.max[2], p.z() + 1);
-	}
-
-	fn finalize(&self) -> Aabb {
-		let lo = WorldPos::new(
-			self.min[0].load(Ordering::Relaxed),
-			self.min[1].load(Ordering::Relaxed),
-			self.min[2].load(Ordering::Relaxed),
-		);
-		let hi = WorldPos::new(
-			self.max[0].load(Ordering::Relaxed),
-			self.max[1].load(Ordering::Relaxed),
-			self.max[2].load(Ordering::Relaxed),
-		);
-		Aabb::new(lo, hi)
+impl FromIterator<WorldEdit> for ModelBuilder {
+	fn from_iter<I: IntoIterator<Item = WorldEdit>>(iter: I) -> Self {
+		Self { edits: iter.into_iter().collect() }
 	}
 }
 
-#[inline]
-fn atomic_min(a: &AtomicI32, v: i32) {
-	let mut cur = a.load(Ordering::Relaxed);
-	while v < cur {
-		match a.compare_exchange_weak(cur, v, Ordering::Relaxed, Ordering::Relaxed) {
-			Ok(_) => return,
-			Err(actual) => cur = actual,
-		}
+fn bounds_of(edits: &[WorldEdit]) -> Aabb {
+	if edits.is_empty() {
+		return Aabb::new(WorldPos::new(0, 0, 0), WorldPos::new(0, 0, 0));
 	}
-}
-
-#[inline]
-fn atomic_max(a: &AtomicI32, v: i32) {
-	let mut cur = a.load(Ordering::Relaxed);
-	while v > cur {
-		match a.compare_exchange_weak(cur, v, Ordering::Relaxed, Ordering::Relaxed) {
-			Ok(_) => return,
-			Err(actual) => cur = actual,
-		}
+	let mut min = WorldPos::splat(i32::MAX);
+	let mut max = WorldPos::splat(i32::MIN);
+	for edit in edits {
+		min = WorldPos::from_fn(|i| min[i].min(edit.pos[i]));
+		max = WorldPos::from_fn(|i| max[i].max(edit.pos[i] + 1));
 	}
-}
-
-#[inline]
-fn shard_of(chunk_id: ChunkId, num_shards: usize) -> usize {
-	let mut h = AHasher::default();
-	chunk_id.hash(&mut h);
-	(h.finish() as usize) & (num_shards - 1)
+	Aabb::new(min, max)
 }

@@ -28,7 +28,8 @@ pub trait Source: Sized + Clone {
 	}
 }
 
-pub const CHUNK_SIDE: i32 = 256;
+use crate::util::types::CHUNK_SIZE;
+
 const INTERIOR_DEPTHS: u8 = 3;
 
 #[derive(Clone)]
@@ -424,7 +425,7 @@ impl Serializer {
 
 pub fn build_chunk<S: Source>(source: &S) -> Chunk {
 	let mut arena = Arena::default();
-	let root = build_cell(&mut arena, source, [0, 0, 0], CHUNK_SIDE, 0);
+	let root = build_cell(&mut arena, source, [0, 0, 0], CHUNK_SIZE, 0);
 
 	let mut ser = Serializer::new();
 	match root {

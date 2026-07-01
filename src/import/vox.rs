@@ -27,7 +27,7 @@ pub fn import_vox(bytes: &[u8]) -> Result<Model, ImportError> {
 		.collect();
 
 	// Scene traversal is cheap (no voxel iteration). Collect the placements
-	// here, then emit voxels into the builder in parallel.
+	// first, then emit voxels for each placement in parallel.
 	let mut instances: Vec<Instance> = Vec::new();
 	let origin = WorldPos::new(0, 0, 0);
 	if data.scenes.is_empty() {
@@ -38,23 +38,27 @@ pub fn import_vox(bytes: &[u8]) -> Result<Model, ImportError> {
 		walk_scene(&data, 0, origin, &mut instances);
 	}
 
-	let builder = ModelBuilder::new();
-	instances.par_iter().for_each(|inst| {
-		let model = match data.models.get(inst.model_id as usize) {
-			Some(m) => m,
-			None => return,
-		};
-		for v in &model.voxels {
-			let m = match palette.get(v.i as usize) {
-				Some(m) if !m.is_air() => *m,
-				_ => continue,
-			};
-			let pos = inst.corner + WorldPos::new(v.x as i32, v.y as i32, v.z as i32);
-			builder.add(WorldEdit { pos, material: m });
-		}
-	});
+	let world_edits: Vec<WorldEdit> = instances
+		.par_iter()
+		.flat_map_iter(|instance| {
+			let model = data.models.get(instance.model_id as usize);
+			let palette = &palette;
+			let corner = instance.corner;
+			model
+				.into_iter()
+				.flat_map(|m| m.voxels.iter())
+				.filter_map(move |v| {
+					let material = *palette.get(v.i as usize)?;
+					if material.is_air() {
+						return None;
+					}
+					let pos = corner + WorldPos::new(v.x as i32, v.y as i32, v.z as i32);
+					Some(WorldEdit { pos, material })
+				})
+		})
+		.collect();
 
-	Ok(builder.bake())
+	Ok(ModelBuilder::from_edits(world_edits).bake())
 }
 
 #[derive(Clone, Copy)]
