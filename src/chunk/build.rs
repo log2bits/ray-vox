@@ -4,7 +4,7 @@ use super::material::Material;
 use super::node::{ChildMasks, InteriorNode, LeafNode, unpack_slot};
 use super::{Child, Chunk};
 use crate::util::PalettedVec;
-use crate::util::types::Mask64;
+use crate::util::types::{CHUNK_SIZE, Mask64};
 
 #[derive(Copy, Clone, Debug)]
 pub enum Sample {
@@ -28,8 +28,6 @@ pub trait Source: Sized + Clone {
 	}
 }
 
-use crate::util::types::CHUNK_SIZE;
-
 const INTERIOR_DEPTHS: u8 = 3;
 
 #[derive(Clone)]
@@ -38,6 +36,9 @@ struct LeafData {
 	materials: [Material; 64],
 }
 
+// The Arena holds the tree as it's built cell-by-cell from the Source.
+// Nodes are placed by push order and referenced by index. Once the tree is
+// complete, the Serializer walks it and produces the final Chunk layout.
 #[derive(Default)]
 struct Arena {
 	leaves: Vec<LeafData>,
@@ -60,16 +61,19 @@ impl Arena {
 	}
 }
 
+// Collapse a slot's 64 children into a single Child. Uniform-filled children
+// collapse into a Filled cell; a mix of Filled cells becomes a Leaf; anything
+// containing an Interior or Leaf gets stored as an interior node.
 fn classify_children(arena: &mut Arena, children: [Child; 64]) -> Child {
-	let mut nonempty = false;
-	let mut any_nested = false;
+	let mut has_any = false;
+	let mut has_nested = false;
 	let mut uniform_fill: Option<Material> = None;
 	let mut all_same = true;
 	for c in &children {
 		match c {
 			Child::Empty => {}
 			Child::Filled(m) => {
-				nonempty = true;
+				has_any = true;
 				match uniform_fill {
 					None => uniform_fill = Some(*m),
 					Some(prev) if prev == *m => {}
@@ -77,28 +81,28 @@ fn classify_children(arena: &mut Arena, children: [Child; 64]) -> Child {
 				}
 			}
 			Child::Leaf(_) | Child::Interior(_) => {
-				nonempty = true;
-				any_nested = true;
+				has_any = true;
+				has_nested = true;
 				all_same = false;
 			}
 		}
 	}
-	if !nonempty {
+	if !has_any {
 		return Child::Empty;
 	}
-	if !any_nested {
+	if !has_nested {
 		if all_same && uniform_fill.is_some() && children.iter().all(|c| matches!(c, Child::Filled(_))) {
 			return Child::Filled(uniform_fill.unwrap());
 		}
-		let mut occ = Mask64::EMPTY;
-		let mut mats = [Material::air(); 64];
-		for (i, c) in children.iter().enumerate() {
+		let mut occupancy = Mask64::EMPTY;
+		let mut materials = [Material::air(); 64];
+		for (slot, c) in children.iter().enumerate() {
 			if let Child::Filled(m) = c {
-				occ |= Mask64::bit(i as u8);
-				mats[i] = *m;
+				occupancy |= Mask64::bit(slot as u8);
+				materials[slot] = *m;
 			}
 		}
-		return arena.push_leaf(LeafData { occupancy: occ, materials: mats });
+		return arena.push_leaf(LeafData { occupancy, materials });
 	}
 	arena.push_interior(children)
 }
@@ -138,8 +142,8 @@ fn build_cell<S: Source>(
 }
 
 fn build_leaf<S: Source>(arena: &mut Arena, source: &S, lo: [i32; 3]) -> Child {
-	let mut occ = Mask64::EMPTY;
-	let mut mats = [Material::air(); 64];
+	let mut occupancy = Mask64::EMPTY;
+	let mut materials = [Material::air(); 64];
 	for x in 0..4i32 {
 		for y in 0..4i32 {
 			for z in 0..4i32 {
@@ -149,81 +153,58 @@ fn build_leaf<S: Source>(arena: &mut Arena, source: &S, lo: [i32; 3]) -> Child {
 				};
 				if !m.is_air() {
 					let slot = ((x as u8) << 4) | ((y as u8) << 2) | z as u8;
-					occ |= Mask64::bit(slot);
-					mats[slot as usize] = m;
+					occupancy |= Mask64::bit(slot);
+					materials[slot as usize] = m;
 				}
 			}
 		}
 	}
-	if occ.is_empty() {
+	if occupancy.is_empty() {
 		return Child::Empty;
 	}
-	if occ == Mask64::FULL {
-		let first = mats[0];
-		if mats.iter().all(|&m| m == first) {
+	if occupancy == Mask64::FULL {
+		let first = materials[0];
+		if materials.iter().all(|&m| m == first) {
 			return Child::Filled(first);
 		}
 	}
-	arena.push_leaf(LeafData { occupancy: occ, materials: mats })
+	arena.push_leaf(LeafData { occupancy, materials })
 }
 
-pub fn mode_over(occupancy: Mask64, mats: &[Material; 64]) -> Material {
-	let mut keys = [Material::air(); 64];
-	let mut counts = [0u32; 64];
-	let mut n = 0usize;
-	let mut best = (Material::air(), 64 - occupancy.count());
-	for slot in occupancy.iter_slots() {
-		let m = mats[slot as usize];
-		let j = match keys[..n].iter().position(|&k| k == m) {
-			Some(j) => j,
-			None => {
-				keys[n] = m;
-				counts[n] = 0;
-				let j = n;
-				n += 1;
-				j
-			}
-		};
-		counts[j] += 1;
-		if counts[j] > best.1 {
-			best = (m, counts[j]);
-		}
-	}
-	best.0
-}
-
+// Walks the arena tree and writes a Chunk in the on-disk layout. Every parent
+// interior node stores its interior and leaf children contiguously in the
+// output arrays (indexed by popcount), so we hold each intermediate node
+// aside until its parent copies it into place.
 struct Serializer {
-	canonical_interiors: Vec<InteriorNode>,
-	canonical_leaves: Vec<LeafNode>,
+	staged_interiors: Vec<InteriorNode>,
+	staged_leaves: Vec<LeafNode>,
 	out_interiors: Vec<InteriorNode>,
 	out_leaves: Vec<LeafNode>,
 	out_materials: PalettedVec<Material>,
-	// Parallel raw view of out_materials, used so overlap-extend and the
-	// full-run verify can read entries without going through the LUT.
-	// Dropped when the chunk finalises.
+	// A raw mirror of out_materials so material-run dedup can compare entries
+	// without going through the palette LUT. Dropped when the chunk finalises.
 	raw_materials: Vec<Material>,
 	run_index: AHashMap<u64, u32>,
-	leaf_sig: AHashMap<u64, u32>,
-	int_sig: AHashMap<u64, u32>,
 }
 
 impl Serializer {
 	fn new() -> Self {
 		Self {
-			canonical_interiors: Vec::new(),
-			canonical_leaves: Vec::new(),
+			staged_interiors: Vec::new(),
+			staged_leaves: Vec::new(),
 			out_interiors: Vec::new(),
 			out_leaves: Vec::new(),
 			out_materials: PalettedVec::new(),
 			raw_materials: Vec::new(),
 			run_index: AHashMap::new(),
-			leaf_sig: AHashMap::new(),
-			int_sig: AHashMap::new(),
 		}
 	}
 
+	// Two-tier material-run dedup. First try an exact full-run match via a
+	// hash index. If that misses, look at the tail of the array for the
+	// longest overlap with the head of this run, and append only the missing
+	// suffix. Together they collapse uniform-material regions to near-zero.
 	fn emit_material_run(&mut self, run: &[Material]) -> u32 {
-		// Full-run exact match.
 		let full_hash = hash_run(run);
 		if let Some(&offset) = self.run_index.get(&full_hash) {
 			if self.run_matches_at(offset, run) {
@@ -231,195 +212,108 @@ impl Serializer {
 			}
 		}
 
-		// Overlap-extend — find the longest i such that the array's last i
-		// entries equal the run's first i entries. Then we only append
-		// run[i..] and point this node at arr_len - i. Handles the case
-		// where a shorter prefix-equivalent run was emitted before a longer
-		// one (which the full-run hash alone can't catch).
-		let arr_len = self.raw_materials.len();
-		let max_overlap = run.len().min(arr_len);
+		let array_len = self.raw_materials.len();
+		let max_overlap = run.len().min(array_len);
 		let mut overlap = 0;
 		for i in (1..=max_overlap).rev() {
-			if self.raw_materials[arr_len - i..arr_len] == run[..i] {
+			if self.raw_materials[array_len - i..array_len] == run[..i] {
 				overlap = i;
 				break;
 			}
 		}
 
-		let offset = (arr_len - overlap) as u32;
+		let offset = (array_len - overlap) as u32;
 		for &m in &run[overlap..] {
 			self.out_materials.push(m);
 			self.raw_materials.push(m);
 		}
 
 		self.run_index.entry(full_hash).or_insert(offset);
-
 		offset
 	}
 
 	fn run_matches_at(&self, offset: u32, run: &[Material]) -> bool {
-		let off = offset as usize;
-		if off + run.len() > self.raw_materials.len() {
+		let start = offset as usize;
+		if start + run.len() > self.raw_materials.len() {
 			return false;
 		}
-		&self.raw_materials[off..off + run.len()] == run
+		&self.raw_materials[start..start + run.len()] == run
 	}
 
-	fn intern_leaf(&mut self, leaf: &LeafData) -> u32 {
-		let mut hash = fnv_start();
-		hash = fnv_mix(hash, fold_mask(leaf.occupancy));
-		let mut run = [Material::air(); 64];
-		let mut len = 0;
-		for slot in leaf.occupancy.iter_slots() {
-			run[len] = leaf.materials[slot as usize];
-			hash = fnv_mix(hash, run[len].into());
-			len += 1;
-		}
-		if let Some(&cand) = self.leaf_sig.get(&hash) {
-			let c = self.canonical_leaves[cand as usize];
-			if c.occupancy == leaf.occupancy {
-				let ok = leaf.occupancy.iter_slots().all(|s| {
-					self.out_materials.get(c.material_index(s)) == leaf.materials[s as usize]
-				});
-				if ok {
-					return cand;
-				}
-			}
-		}
-		let mat_offset = self.emit_material_run(&run[..len]);
-		let mut node = LeafNode::default();
-		node.occupancy = leaf.occupancy;
-		node.set_material_offset(mat_offset);
-		let new_idx = self.canonical_leaves.len() as u32;
-		self.canonical_leaves.push(node);
-		self.leaf_sig.entry(hash).or_insert(new_idx);
-		new_idx
-	}
-
-	fn lower(&mut self, arena: &Arena, cell: Child) -> (Child, Material) {
+	// Lower an arena cell to its serialised form. Returns a Child pointing
+	// into staged_leaves / staged_interiors. Empty and Filled cells pass
+	// through unchanged since they carry no node storage.
+	fn lower(&mut self, arena: &Arena, cell: Child) -> Child {
 		match cell {
-			Child::Empty => (Child::Empty, Material::air()),
-			Child::Filled(m) => (Child::Filled(m), m),
+			Child::Empty => Child::Empty,
+			Child::Filled(m) => Child::Filled(m),
 			Child::Leaf(id) => {
 				let leaf = &arena.leaves[id as usize];
-				let canonical = self.intern_leaf(leaf);
-				(Child::Leaf(canonical), mode_over(leaf.occupancy, &leaf.materials))
+				let mut run = [Material::air(); 64];
+				let mut run_len = 0;
+				for slot in leaf.occupancy.iter_slots() {
+					run[run_len] = leaf.materials[slot as usize];
+					run_len += 1;
+				}
+				let material_offset = self.emit_material_run(&run[..run_len]);
+				let mut node = LeafNode::default();
+				node.occupancy = leaf.occupancy;
+				node.set_material_offset(material_offset);
+				let staged_index = self.staged_leaves.len() as u32;
+				self.staged_leaves.push(node);
+				Child::Leaf(staged_index)
 			}
 			Child::Interior(id) => {
 				let children = arena.interiors[id as usize];
 				let mut lowered: [Child; 64] = [Child::Empty; 64];
-				let mut lods = [Material::air(); 64];
+				let mut filled_materials = [Material::air(); 64];
 				let mut masks = ChildMasks::default();
 				for slot in 0..64u8 {
-					let (c, lod) = self.lower(arena, children[slot as usize]);
-					lowered[slot as usize] = c;
-					lods[slot as usize] = lod;
-					masks.set_state(slot, c.state());
-				}
-
-				let mut hash = fnv_start();
-				hash = fnv_mix(hash, fold_mask(masks.has_child));
-				hash = fnv_mix(hash, fold_mask(masks.is_leaf));
-				for slot in masks.occupancy().iter_slots() {
-					hash = fnv_mix(hash, lods[slot as usize].into());
-					let canon = match lowered[slot as usize] {
-						Child::Interior(c) | Child::Leaf(c) => c,
-						_ => 0,
-					};
-					hash = fnv_mix(hash, canon);
-				}
-				if let Some(&cand) = self.int_sig.get(&hash) {
-					if self.interior_eq(cand, masks, &lods, &lowered) {
-						return (Child::Interior(cand), mode_over(masks.occupancy(), &lods));
+					let child = self.lower(arena, children[slot as usize]);
+					if let Child::Filled(m) = child {
+						filled_materials[slot as usize] = m;
 					}
+					lowered[slot as usize] = child;
+					masks.set_state(slot, child.state());
 				}
 
+				// Copy this parent's interior and leaf children into the
+				// output arrays contiguously, in slot order. The popcount
+				// scheme on the parent's masks will index into these ranges.
 				let interior_ptr = self.out_interiors.len() as u32;
 				let leaf_ptr = self.out_leaves.len() as u32;
 				for slot in masks.interiors().iter_slots() {
-					if let Child::Interior(c) = lowered[slot as usize] {
-						let n = self.canonical_interiors[c as usize];
-						self.out_interiors.push(n);
+					if let Child::Interior(staged_index) = lowered[slot as usize] {
+						self.out_interiors.push(self.staged_interiors[staged_index as usize]);
 					}
 				}
 				for slot in masks.leaves().iter_slots() {
-					if let Child::Leaf(c) = lowered[slot as usize] {
-						let n = self.canonical_leaves[c as usize];
-						self.out_leaves.push(n);
+					if let Child::Leaf(staged_index) = lowered[slot as usize] {
+						self.out_leaves.push(self.staged_leaves[staged_index as usize]);
 					}
 				}
+
+				// The material run for an interior stores only its filled
+				// children. Interior and leaf slots don't need a material at
+				// this level because the child node holds its own materials.
 				let mut run = [Material::air(); 64];
 				let mut run_len = 0;
-				for slot in masks.occupancy().iter_slots() {
-					run[run_len] = lods[slot as usize];
+				for slot in masks.filled().iter_slots() {
+					run[run_len] = filled_materials[slot as usize];
 					run_len += 1;
 				}
-				let mat_offset = self.emit_material_run(&run[..run_len]);
-				let mut out = InteriorNode::default();
-				out.masks = masks;
-				out.set_interior_offset(interior_ptr);
-				out.set_leaf_offset(leaf_ptr);
-				out.set_material_offset(mat_offset);
-				let new_idx = self.canonical_interiors.len() as u32;
-				self.canonical_interiors.push(out);
-				self.int_sig.entry(hash).or_insert(new_idx);
-				(Child::Interior(new_idx), mode_over(masks.occupancy(), &lods))
-			}
-		}
-	}
+				let material_offset = self.emit_material_run(&run[..run_len]);
 
-	fn interior_eq(
-		&self,
-		cand: u32,
-		masks: ChildMasks,
-		lods: &[Material; 64],
-		lowered: &[Child; 64],
-	) -> bool {
-		let c = self.canonical_interiors[cand as usize];
-		if c.masks.has_child != masks.has_child || c.masks.is_leaf != masks.is_leaf {
-			return false;
-		}
-		for slot in masks.occupancy().iter_slots() {
-			if self.out_materials.get(c.material_index(slot)) != lods[slot as usize] {
-				return false;
+				let mut node = InteriorNode::default();
+				node.masks = masks;
+				node.set_interior_offset(interior_ptr);
+				node.set_leaf_offset(leaf_ptr);
+				node.set_material_offset(material_offset);
+				let staged_index = self.staged_interiors.len() as u32;
+				self.staged_interiors.push(node);
+				Child::Interior(staged_index)
 			}
 		}
-		let mut interior_rank = 0u32;
-		let int_base = c.interior_offset();
-		for slot in masks.interiors().iter_slots() {
-			let want = match lowered[slot as usize] {
-				Child::Interior(want) => want,
-				_ => return false,
-			};
-			let got = &self.out_interiors[(int_base + interior_rank) as usize];
-			let want_node = &self.canonical_interiors[want as usize];
-			if got.masks.has_child != want_node.masks.has_child
-				|| got.masks.is_leaf != want_node.masks.is_leaf
-				|| got.material_offset() != want_node.material_offset()
-				|| got.interior_offset() != want_node.interior_offset()
-				|| got.leaf_offset() != want_node.leaf_offset()
-			{
-				return false;
-			}
-			interior_rank += 1;
-		}
-		let mut leaf_rank = 0u32;
-		let leaf_base = c.leaf_offset();
-		for slot in masks.leaves().iter_slots() {
-			let want = match lowered[slot as usize] {
-				Child::Leaf(want) => want,
-				_ => return false,
-			};
-			let got = &self.out_leaves[(leaf_base + leaf_rank) as usize];
-			let want_node = &self.canonical_leaves[want as usize];
-			if got.occupancy != want_node.occupancy
-				|| got.material_offset() != want_node.material_offset()
-			{
-				return false;
-			}
-			leaf_rank += 1;
-		}
-		true
 	}
 }
 
@@ -427,61 +321,49 @@ pub fn build_chunk<S: Source>(source: &S) -> Chunk {
 	let mut arena = Arena::default();
 	let root = build_cell(&mut arena, source, [0, 0, 0], CHUNK_SIZE, 0);
 
-	let mut ser = Serializer::new();
-	match root {
-		Child::Empty => return Chunk::new(),
-		Child::Filled(m) => {
-			ser.out_materials.push(m);
-			let mut materials = ser.out_materials;
-			materials.shrink_to_fit();
-			return Chunk { leaf_nodes: Vec::new(), materials, interior_nodes: Vec::new() };
-		}
-		_ => {}
+	// Empty and uniform chunks skip node storage entirely. A uniform chunk
+	// stores just its single material at materials[0].
+	if let Child::Empty = root {
+		return Chunk::new();
+	}
+	if let Child::Filled(m) = root {
+		let mut materials = PalettedVec::new();
+		materials.push(m);
+		materials.shrink_to_fit();
+		return Chunk {
+			leaf_nodes: Vec::new(),
+			materials,
+			interior_nodes: Vec::new(),
+		};
 	}
 
-	ser.out_materials.push(Material::air());
-	ser.raw_materials.push(Material::air());
-	let (root_cell, chunk_lod) = ser.lower(&arena, root);
+	let mut serializer = Serializer::new();
+	let root_cell = serializer.lower(&arena, root);
 
-	let mut head = Vec::with_capacity(ser.out_materials.len() as usize);
-	head.push(chunk_lod);
-	for i in 1..ser.out_materials.len() {
-		head.push(ser.out_materials.get(i));
-	}
-	ser.out_materials.clear();
-	for m in head {
-		ser.out_materials.push(m);
-	}
-
+	// The root node has no parent to copy it into place, so we push it here.
 	match root_cell {
-		Child::Interior(c) => {
-			let n = ser.canonical_interiors[c as usize];
-			ser.out_interiors.push(n);
+		Child::Interior(staged_index) => {
+			serializer.out_interiors.push(serializer.staged_interiors[staged_index as usize]);
 		}
-		Child::Leaf(c) => {
-			let n = ser.canonical_leaves[c as usize];
-			ser.out_leaves.push(n);
+		Child::Leaf(staged_index) => {
+			serializer.out_leaves.push(serializer.staged_leaves[staged_index as usize]);
 		}
 		_ => {}
 	}
 
-	let mut materials = ser.out_materials;
+	let mut materials = serializer.out_materials;
 	materials.shrink_to_fit();
 	Chunk {
-		leaf_nodes: ser.out_leaves,
+		leaf_nodes: serializer.out_leaves,
 		materials,
-		interior_nodes: ser.out_interiors,
+		interior_nodes: serializer.out_interiors,
 	}
-}
-
-#[inline]
-fn fold_mask(m: Mask64) -> u32 {
-	let v = m.raw();
-	(v as u32) ^ ((v >> 32) as u32)
 }
 
 #[inline(always)]
-fn fnv_start() -> u64 { 0xcbf29ce484222325 }
+fn fnv_start() -> u64 {
+	0xcbf29ce484222325
+}
 
 #[inline(always)]
 fn fnv_mix(hash: u64, value: u32) -> u64 {

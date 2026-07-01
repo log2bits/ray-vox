@@ -100,9 +100,11 @@ impl ChildMasks {
 		self.leaves().popcount_below(slot)
 	}
 
+	// Interior nodes only store materials for cells in the Filled state, so
+	// the material rank counts filled slots below the target slot.
 	#[inline]
 	pub fn material_rank(&self, slot: u8) -> u32 {
-		self.occupancy().popcount_below(slot)
+		self.filled().popcount_below(slot)
 	}
 }
 

@@ -1,11 +1,11 @@
-use super::build::{build_chunk, mode_over};
+use super::build::build_chunk;
 use super::edit::{EditPacket, Path};
 use super::material::Material;
 use super::sources::{DiscreteSource, Overlay};
 use super::Chunk;
 use crate::generate::volume::sphere::Sphere;
 use crate::generate::Edit;
-use crate::util::types::{ChunkId, ChunkPos, Mask64, WorldPos};
+use crate::util::types::{ChunkId, ChunkPos, WorldPos};
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 use std::collections::HashMap;
@@ -166,57 +166,6 @@ fn depth3_cube_edit() {
 }
 
 #[test]
-fn mode_over_picks_most_frequent_material_when_majority_occupied() {
-	let a = mat(0x11111140);
-	let b = mat(0x22222240);
-	let c = mat(0x33333340);
-
-	let mut mats = [Material::air(); 64];
-	let mut occ_bits = 0u64;
-	for i in 0..50 {
-		mats[i] = a;
-		occ_bits |= 1u64 << i;
-	}
-	for i in 50..58 {
-		mats[i] = b;
-		occ_bits |= 1u64 << i;
-	}
-	for i in 58..62 {
-		mats[i] = c;
-		occ_bits |= 1u64 << i;
-	}
-	assert_eq!(mode_over(Mask64::new(occ_bits), &mats), a);
-}
-
-#[test]
-fn mode_over_returns_air_when_majority_unoccupied() {
-	let a = mat(0x11111140);
-	let b = mat(0x22222240);
-
-	let mut mats = [Material::air(); 64];
-	mats[0] = a;
-	mats[1] = a;
-	mats[2] = a;
-	mats[5] = b;
-	mats[10] = b;
-	let occ = Mask64::new(1 | 1 << 1 | 1 << 2 | 1 << 5 | 1 << 10);
-	assert_eq!(mode_over(occ, &mats), Material::air());
-}
-
-#[test]
-fn mode_over_breaks_ties_with_air_by_returning_air() {
-	let a = mat(0xAAAAAA40);
-
-	let mut mats = [Material::air(); 64];
-	let mut occ_bits = 0u64;
-	for i in 0..32 {
-		mats[i] = a;
-		occ_bits |= 1u64 << i;
-	}
-	assert_eq!(mode_over(Mask64::new(occ_bits), &mats), Material::air());
-}
-
-#[test]
 fn dedup_handles_identical_subtrees() {
 	let m = mat(0x55667740);
 	let mut edits = EditPacket::default();
@@ -245,9 +194,10 @@ fn dedup_handles_identical_subtrees() {
 	assert_eq!(chunk.voxel_at(ChunkPos::new(8, 8, 8)), Material::air());
 	assert_eq!(chunk.voxel_at(ChunkPos::new(100, 100, 100)), Material::air());
 
-	// Material LUT: air for the chunk LOD plus `m` for the cubes. Without run-dedup,
-	// each of the four identical leaves would have its own material run.
-	assert_eq!(chunk.materials.lut.len(), 2);
+	// Material LUT holds a single entry for m. Without run-dedup, each of the
+	// four identical leaves would have contributed its own material run of 64
+	// copies of m.
+	assert_eq!(chunk.materials.lut.len(), 1);
 }
 
 fn uniform_chunk(m: Material) -> Chunk {
@@ -319,34 +269,20 @@ fn sphere_carve_leaves_air_hole_in_filled_chunk() {
 }
 
 #[test]
-fn chunk_lod_at_materials_zero_invariant() {
+fn empty_and_uniform_chunks_use_the_materials_zero_shortcut() {
 	let empty = Chunk::new();
-	assert_eq!(empty.chunk_lod(), Material::air());
 	assert!(empty.materials.is_empty());
+	assert!(empty.interior_nodes.is_empty() && empty.leaf_nodes.is_empty());
+	assert_eq!(empty.voxel_at(ChunkPos::new(0, 0, 0)), Material::air());
 
 	let m = mat(0xCAFEBE40);
 	let u = uniform_chunk(m);
-	assert_eq!(u.chunk_lod(), m);
+	assert!(u.is_uniform());
 	assert_eq!(u.materials.len(), 1);
-	assert_eq!(u.materials.get(0), m);
+	assert_eq!(u.uniform_material(), m);
 	assert!(u.interior_nodes.is_empty() && u.leaf_nodes.is_empty());
-
-	// Sparse content (one 4x4x4 cube out of 64^3 voxels) coarsens to air at the chunk LOD,
-	// but the materials[0] = chunk_lod() invariant still holds.
-	let mut e = EditPacket::default();
-	e.push(Path::from_coords(ChunkPos::new(0, 0, 0), 3), m);
-	let c = bake_one(Chunk::new(), e);
-	assert!(!c.interior_nodes.is_empty() || !c.leaf_nodes.is_empty());
-	assert_eq!(c.chunk_lod(), Material::air());
-	assert_eq!(c.materials.get(0), Material::air());
-
-	// When >32/64 children at every level carry material `a`, it wins the mode and
-	// propagates up to the chunk LOD.
-	let a = mat(0x11111140);
-	let mut e = EditPacket::default();
-	e.push(Path::from(0u32), a);
-	let c = bake_one(Chunk::new(), e);
-	assert_eq!(c.chunk_lod(), a);
+	assert_eq!(u.voxel_at(ChunkPos::new(0, 0, 0)), m);
+	assert_eq!(u.voxel_at(ChunkPos::new(255, 255, 255)), m);
 }
 
 #[test]

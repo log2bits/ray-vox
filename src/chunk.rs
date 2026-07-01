@@ -60,12 +60,11 @@ impl Chunk {
 		self.interior_nodes.is_empty() && self.leaf_nodes.is_empty() && self.materials.is_empty()
 	}
 
-	pub fn chunk_lod(&self) -> Material {
-		if self.materials.is_empty() {
-			Material::air()
-		} else {
-			self.materials.get(0)
-		}
+	// The material of a uniform chunk (no nodes, exactly one material entry).
+	// Panics if called on a non-uniform chunk.
+	pub fn uniform_material(&self) -> Material {
+		debug_assert!(self.is_uniform(), "uniform_material called on non-uniform chunk");
+		self.materials.get(0)
 	}
 
 	pub fn root_idx(&self) -> u32 {
@@ -136,7 +135,10 @@ impl Chunk {
 
 	pub fn voxel_at(&self, pos: ChunkPos) -> Material {
 		if self.interior_nodes.is_empty() && self.leaf_nodes.is_empty() {
-			return self.chunk_lod();
+			if self.materials.is_empty() {
+				return Material::air();
+			}
+			return self.materials.get(0);
 		}
 		let path = Path::from_coords(pos, 4);
 		if self.interior_nodes.is_empty() {
