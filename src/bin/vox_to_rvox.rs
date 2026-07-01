@@ -1,4 +1,4 @@
-use ray_vox::generate::model::Model;
+use ray_vox::world::World;
 use std::io::BufWriter;
 use std::time::Instant;
 
@@ -32,14 +32,20 @@ fn main() -> anyhow::Result<()> {
 
 	println!("\nimporting...");
 	let start = Instant::now();
-	let model = ray_vox::import::vox::import_vox(&bytes)
+	let world = ray_vox::import::vox::import_vox(&bytes)
 		.map_err(|e| anyhow::anyhow!("import failed: {}", e))?;
-	println!("  {} chunks in {:?}", model.chunk_count(), start.elapsed());
+	let non_empty = world.chunks.iter().filter(|c| c.is_some()).count();
+	println!(
+		"  {} non-empty chunks (grid {:?}) in {:?}",
+		non_empty, world.chunk_grid_dim, start.elapsed(),
+	);
 
-	let imported_voxels: u64 = model.chunks.values().map(|c| c.stored_volume()).sum();
-	let distinct_materials: usize = model
-		.chunks
-		.values()
+	let imported_voxels: u64 = world.chunks.iter()
+		.filter_map(|c| c.as_ref())
+		.map(|c| c.stored_volume())
+		.sum();
+	let distinct_materials: usize = world.chunks.iter()
+		.filter_map(|c| c.as_ref())
 		.flat_map(|c| c.materials.lut.values.iter().copied())
 		.collect::<std::collections::HashSet<_>>()
 		.len();
@@ -53,16 +59,16 @@ fn main() -> anyhow::Result<()> {
 	}
 
 	println!(
-		"\nbounds: min={:?} max={:?}",
-		<[i32; 3]>::from(model.bounds.min),
-		<[i32; 3]>::from(model.bounds.max),
+		"\nworld origin: {:?}, grid: {} x {} x {} chunks",
+		<[i32; 3]>::from(world.origin),
+		world.chunk_grid_dim[0], world.chunk_grid_dim[1], world.chunk_grid_dim[2],
 	);
 
 	println!("\nwriting {}...", output_path);
 	let start = Instant::now();
 	let file = std::fs::File::create(output_path)?;
 	let mut writer = BufWriter::new(file);
-	model.save_rvox(&mut writer)
+	world.save_rvox(&mut writer)
 		.map_err(|e| anyhow::anyhow!("save failed: {}", e))?;
 	drop(writer);
 	let output_size = std::fs::metadata(output_path)?.len();
@@ -72,10 +78,11 @@ fn main() -> anyhow::Result<()> {
 	let start = Instant::now();
 	let bytes = std::fs::read(output_path)?;
 	let mut cursor = std::io::Cursor::new(&bytes);
-	let reloaded = Model::load_rvox(&mut cursor)
+	let reloaded = World::load_rvox(&mut cursor)
 		.map_err(|e| anyhow::anyhow!("reload failed: {}", e))?;
-	assert_eq!(reloaded.chunk_count(), model.chunk_count(), "chunk count mismatch");
-	println!("  loaded {} chunks in {:?}, counts match", reloaded.chunk_count(), start.elapsed());
+	let reloaded_non_empty = reloaded.chunks.iter().filter(|c| c.is_some()).count();
+	assert_eq!(reloaded_non_empty, non_empty, "chunk count mismatch");
+	println!("  loaded {} chunks in {:?}, counts match", reloaded_non_empty, start.elapsed());
 
 	Ok(())
 }

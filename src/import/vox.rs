@@ -1,6 +1,6 @@
 use crate::chunk::material::Material;
-use crate::generate::model::{Model, ModelBuilder, WorldEdit};
 use crate::util::types::WorldPos;
+use crate::world::{World, WorldEdit};
 use dot_vox::{DotVoxData, SceneNode};
 use rayon::prelude::*;
 
@@ -19,7 +19,7 @@ impl std::fmt::Display for ImportError {
 
 impl std::error::Error for ImportError {}
 
-pub fn import_vox(bytes: &[u8]) -> Result<Model, ImportError> {
+pub fn import_vox(bytes: &[u8]) -> Result<World, ImportError> {
 	let data = dot_vox::load_bytes(bytes).map_err(|e| ImportError::BadVox(e.into()))?;
 
 	let palette: Vec<Material> = data.palette.iter()
@@ -58,7 +58,7 @@ pub fn import_vox(bytes: &[u8]) -> Result<Model, ImportError> {
 		})
 		.collect();
 
-	Ok(ModelBuilder::from_edits(world_edits).bake())
+	Ok(World::from_edits(world_edits))
 }
 
 #[derive(Clone, Copy)]

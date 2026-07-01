@@ -1,11 +1,8 @@
 use ray_vox::chunk::{Child, Chunk};
-use ray_vox::generate::model::Model;
+use ray_vox::world::World;
 
 const FILE_HEADER_BYTES: u64 = 4 + 4 + 12 + 12 + 4;
-const CHUNK_ID_BYTES: u64 = 12 + 4;
-const CHUNK_NODE_HEADER_BYTES: u64 = 8;
-const PALETTE_HEADER_BYTES: u64 = 4;
-const PACKED_HEADER_BYTES: u64 = 12;
+const CHUNK_HEADER_BYTES: u64 = 12 + 8 + 4 + 12;
 const INTERIOR_NODE_BYTES: u64 = 24;
 const LEAF_NODE_BYTES: u64 = 12;
 const MATERIAL_ENTRY_BYTES: u64 = 4;
@@ -18,7 +15,7 @@ fn main() -> anyhow::Result<()> {
 	let bytes = std::fs::read(&path)?;
 	let on_disk = bytes.len() as u64;
 	let mut cursor = std::io::Cursor::new(&bytes);
-	let model = Model::load_rvox(&mut cursor)
+	let world = World::load_rvox(&mut cursor)
 		.map_err(|e| anyhow::anyhow!("load failed: {}", e))?;
 
 	let mut interior_bytes: u64 = 0;
@@ -26,6 +23,7 @@ fn main() -> anyhow::Result<()> {
 	let mut palette_bytes: u64 = 0;
 	let mut indices_bytes: u64 = 0;
 	let mut per_chunk_meta_bytes: u64 = 0;
+	let mut non_empty_chunks: u64 = 0;
 
 	let mut actual_material_entries: u64 = 0;
 	let mut naive_material_entries: u64 = 0;
@@ -36,18 +34,18 @@ fn main() -> anyhow::Result<()> {
 	let mut naive_interior_refs: u64 = 0;
 	let mut naive_leaf_refs: u64 = 0;
 
-	for chunk in model.chunks.values() {
+	for chunk in world.chunks.iter().filter_map(|c| c.as_ref()) {
+		non_empty_chunks += 1;
 		let interior = INTERIOR_NODE_BYTES * chunk.interior_nodes.len() as u64;
 		let leaf = LEAF_NODE_BYTES * chunk.leaf_nodes.len() as u64;
 		let palette = MATERIAL_ENTRY_BYTES * chunk.materials.lut.values.len() as u64;
 		let indices = WORD_BYTES * chunk.materials.indices.words.len() as u64;
-		let meta = CHUNK_ID_BYTES + CHUNK_NODE_HEADER_BYTES + PALETTE_HEADER_BYTES + PACKED_HEADER_BYTES;
 
 		interior_bytes += interior;
 		leaf_bytes += leaf;
 		palette_bytes += palette;
 		indices_bytes += indices;
-		per_chunk_meta_bytes += meta;
+		per_chunk_meta_bytes += CHUNK_HEADER_BYTES;
 
 		actual_material_entries += chunk.materials.indices.len as u64;
 
@@ -80,14 +78,18 @@ fn main() -> anyhow::Result<()> {
 	if accounted != on_disk {
 		println!("  (mismatch: {} bytes)", on_disk as i64 - accounted as i64);
 	}
-	println!("chunks: {}\n", model.chunks.len());
+	println!(
+		"chunks: {} non-empty (grid {} x {} x {})\n",
+		non_empty_chunks,
+		world.chunk_grid_dim[0], world.chunk_grid_dim[1], world.chunk_grid_dim[2],
+	);
 
 	let total = accounted as f64;
 	let pct = |bytes: u64| 100.0 * bytes as f64 / total;
 
 	println!("breakdown:");
 	println!(
-		"  metadata        {:>12} bytes  {:>6.2}%   (file hdr {} + per-chunk hdr/id {})",
+		"  metadata        {:>12} bytes  {:>6.2}%   (file hdr {} + per-chunk hdr/pos {})",
 		metadata_bytes, pct(metadata_bytes), FILE_HEADER_BYTES, per_chunk_meta_bytes,
 	);
 	println!("  interior nodes  {:>12} bytes  {:>6.2}%", interior_bytes, pct(interior_bytes));

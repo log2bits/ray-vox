@@ -106,3 +106,92 @@ fn air_edit_carves_a_hole() {
 	assert_eq!(chunk.voxel_at(ChunkPos::new(128, 128, 128)), Material::air());
 	assert_eq!(chunk.voxel_at(ChunkPos::new(150, 128, 128)), stone);
 }
+
+#[test]
+fn from_edits_sizes_grid_to_bounds_and_places_chunks() {
+	use crate::world::WorldEdit;
+	let m = mat(0xAB);
+	let edits = vec![
+		WorldEdit { pos: WorldPos::new(10, 20, 30), material: m },
+		WorldEdit { pos: WorldPos::new(260, 20, 30), material: m },
+	];
+	let world = World::from_edits(edits);
+
+	// Two voxels straddle the x=256 chunk boundary, so we need at least
+	// 2 chunks along x and 1 each along y and z. Origin snaps to 0,0,0.
+	assert_eq!(world.origin, WorldPos::new(0, 0, 0));
+	assert_eq!(world.chunk_grid_dim, [2, 1, 1]);
+	assert_eq!(world.chunk_at([0, 0, 0]).map(|c| c.voxel_at(ChunkPos::new(10, 20, 30))), Some(m));
+	assert_eq!(world.chunk_at([1, 0, 0]).map(|c| c.voxel_at(ChunkPos::new(4, 20, 30))), Some(m));
+}
+
+#[test]
+fn rvox_round_trip_preserves_chunks() {
+	let mut world = World::new([2, 1, 1]);
+	let m = mat(0xCAFEBE);
+	world.apply_edit(Arc::new(Sphere::new(WorldPos::new(256, 128, 128), 30, m)));
+	let non_empty_before = world.chunks.iter().filter(|c| c.is_some()).count();
+
+	let mut buf: Vec<u8> = Vec::new();
+	world.save_rvox(&mut buf).expect("save");
+	let mut cursor = std::io::Cursor::new(&buf);
+	let loaded = World::load_rvox(&mut cursor).expect("load");
+
+	assert_eq!(loaded.chunk_grid_dim, world.chunk_grid_dim);
+	assert_eq!(loaded.origin, world.origin);
+	assert_eq!(loaded.chunks.iter().filter(|c| c.is_some()).count(), non_empty_before);
+	for grid_pos in [[0u32, 0, 0], [1, 0, 0]] {
+		let before = world.chunk_at(grid_pos);
+		let after = loaded.chunk_at(grid_pos);
+		match (before, after) {
+			(Some(b), Some(a)) => {
+				assert_eq!(b.voxel_at(ChunkPos::new(255, 128, 128)), a.voxel_at(ChunkPos::new(255, 128, 128)));
+				assert_eq!(b.voxel_at(ChunkPos::new(0, 128, 128)), a.voxel_at(ChunkPos::new(0, 128, 128)));
+			}
+			(None, None) => {}
+			_ => panic!("residency mismatch at {:?}", grid_pos),
+		}
+	}
+}
+
+#[test]
+fn rvox_load_rejects_bad_magic() {
+	let mut bad: Vec<u8> = vec![0; 100];
+	bad[0..4].copy_from_slice(b"XXXX");
+	let mut cursor = std::io::Cursor::new(&bad);
+	let err = World::load_rvox(&mut cursor);
+	assert!(matches!(err, Err(crate::world::RvoxError::BadMagic)));
+}
+
+#[test]
+fn import_vox_from_synthetic_bytes_builds_a_world() {
+	use dot_vox::{Color, DotVoxData, Model as VoxModel, Size, Voxel};
+
+	let voxels = vec![
+		Voxel { x: 1, y: 2, z: 3, i: 0 },
+		Voxel { x: 5, y: 6, z: 7, i: 1 },
+	];
+	let vox_model = VoxModel { size: Size { x: 16, y: 16, z: 16 }, voxels };
+	let mut palette: Vec<Color> = vec![Color { r: 0, g: 0, b: 0, a: 255 }; 256];
+	palette[0] = Color { r: 0xFF, g: 0x10, b: 0x10, a: 0xFF };
+	palette[1] = Color { r: 0x10, g: 0x10, b: 0xFF, a: 0xFF };
+	let data = DotVoxData {
+		version: 150,
+		index_map: (0..255u8).collect(),
+		models: vec![vox_model],
+		palette,
+		materials: Vec::new(),
+		scenes: Vec::new(),
+		layers: Vec::new(),
+	};
+	let mut bytes: Vec<u8> = Vec::new();
+	data.write_vox(&mut bytes).expect("write_vox");
+
+	let world = crate::import::vox::import_vox(&bytes).expect("import");
+	let chunk = world.chunk_at([0, 0, 0]).expect("origin chunk populated");
+	let red = chunk.voxel_at(ChunkPos::new(1, 2, 3));
+	let blue = chunk.voxel_at(ChunkPos::new(5, 6, 7));
+	assert_ne!(red, Material::air());
+	assert_ne!(blue, Material::air());
+	assert_ne!(red, blue);
+}

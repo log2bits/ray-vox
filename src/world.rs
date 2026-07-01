@@ -1,5 +1,11 @@
+pub mod edits;
+pub mod rvox;
+
 #[cfg(test)]
 mod tests;
+
+pub use edits::WorldEdit;
+pub use rvox::RvoxError;
 
 use crate::Chunk;
 use crate::generate::Edit;

@@ -1,4 +1,3 @@
-pub mod model;
 pub mod volume;
 
 use crate::chunk::Chunk;
