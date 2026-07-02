@@ -2,9 +2,9 @@
 
 A voxel renderer that ray traces everything (no rasterization). Rust + WebGPU.
 
-![castle.vox rendered by ray-vox](rvox-render.png)
+![Per-pixel memory-read heatmap of castle.vox](rvox-heatmap.png)
 
-*22M voxels sitting in 15 MB, walked by a single WGSL fragment shader. No rasterization, no acceleration structure on top of the tree, no hardware ray tracing.*
+*Per-pixel memory-read heatmap of castle.vox. Black is a full miss, purple is a shallow tree walk (a filled chunk resolves in one to three reads), and the hot orange edges are grazing rays that had to descend deep and skip along many slot boundaries. The tree earns its keep everywhere the frame stays cool.*
 
 The core data structure is a compact bitpacked sparse tree, one per chunk, arranged in a fixed 3D grid on the GPU. I call it a CBEPSV64:
 
@@ -54,9 +54,9 @@ Even without the "renderable" bonus, `.rvox` is **462x smaller** than the naive 
 
 The compression comes for free from the tree layout: the palette LUT plus material-run dedup shave off 40% of the material entries (3.8 MB) all by themselves. The gzip row is what happens when you pile a normal deflate pass on top of that.
 
-![Per-pixel memory-read heatmap of the same castle view](rvox-heatmap.png)
+![castle.vox rendered by ray-vox](rvox-render.png)
 
-*Same castle view, colored by how many chunk-tree reads each ray did. Black is a full miss, purple is a few reads (interior of a solid chunk exits at depth 1), and the hot orange edges are grazing rays that had to descend deep and skip along many slot boundaries. Most of the frame stays cool because the tree lets a filled voxel resolve in one to three memory reads.*
+*Same 22M voxels shown as the shader actually paints them. One WGSL fragment shader, no rasterization, no acceleration structure on top of the tree, no hardware ray tracing.*
 
 Single-material spheres show the extreme end of the sparse-tree story:
 
