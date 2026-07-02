@@ -2,6 +2,10 @@
 
 A voxel renderer that ray traces everything (no rasterization). Rust + WebGPU.
 
+![castle.vox rendered by ray-vox](rvox-render.png)
+
+*22M voxels sitting in 15 MB, walked by a single WGSL fragment shader. No rasterization, no acceleration structure on top of the tree, no hardware ray tracing.*
+
 The core data structure is a compact bitpacked sparse tree, one per chunk, arranged in a fixed 3D grid on the GPU. I call it a CBEPSV64:
 
 - C, chunked. Independent trees arranged in a fixed 3D grid.
@@ -24,27 +28,46 @@ All numbers below come from `cargo bench --bench bench_sphere` and the `vox_to_r
 
 ## Compression
 
-The castle model in every file format we can compare against:
+The castle model in every file format we can compare against. Castle's grid is 7 × 3 × 7 chunks, so the addressable volume is 1792 × 768 × 1792 = 2.47 billion voxel cells, and only 22M of those (0.89%) hold actual voxels.
 
-| Format                          |     Size | Bytes / voxel | vs. raw `.vox` |
-|:--------------------------------|---------:|--------------:|---------------:|
-| MagicaVoxel `.vox` (raw)        |  84.1 MB |         4.008 |         1.00 x |
-| MagicaVoxel `.vox` + gzip -9    |  34.4 MB |         1.637 |         2.45 x |
-| ray-vox `.rvox` (this project)  |  15.3 MB |         0.728 |         5.51 x |
-| ray-vox `.rvox` + gzip -9       |   6.6 MB |         0.313 |        12.80 x |
+| Format                                          |     Size | Bytes / non-air voxel | vs. raw `.vox` | Renderable? |
+|:------------------------------------------------|---------:|----------------------:|---------------:|:-----------:|
+| Dense `[u8; 3]` over the bounds                 |  6.89 GB |                336.06 |         0.01 x |     no      |
+| Sparse `([u32; 3], [u8; 3])` per non-air voxel  | 314.9 MB |                15.000 |         0.27 x |     no      |
+| MagicaVoxel `.vox` (raw)                        |  84.1 MB |                 4.008 |         1.00 x |     no      |
+| MagicaVoxel `.vox` + gzip -9                    |  34.4 MB |                 1.637 |         2.45 x |     no      |
+| **ray-vox `.rvox` (this project)**              | **15.3 MB** |             **0.728** |     **5.51 x** |   **yes**   |
+| ray-vox `.rvox` + gzip -9                       |   6.6 MB |                 0.313 |        12.80 x |     no      |
 
-`.rvox` gets there without any general-purpose compressor: it's just the bitpacked tree written straight to disk, and the palette LUT plus material-run dedup shave off 40% of the material entries (3.8 MB) all by themselves. The gzip line is what happens when you pile a normal deflate pass on top.
+The first four rows are simpler ways you could try to store the same data. None of them can actually feed a ray tracer as-is:
+
+- **Dense `[u8; 3]`** is a flat 3D array indexed by `(x, y, z)`. Lookup is O(1) so it *is* trivially renderable in principle, except it's 6.89 GB. No consumer GPU has that much VRAM to hand a fragment shader.
+- **Sparse `([u32; 3], [u8; 3])`** is a list of coordinates plus RGB, one entry per occupied voxel. There's no spatial index, so a ray tracer would have to scan the whole 22M-entry list for every ray step, or you'd need to build a completely separate acceleration structure on top before you could render anything.
+- **MagicaVoxel `.vox`** is a scene graph of transforms, groups, and per-model voxel arrays. Every voxel is stored as `(x, y, z, palette_index)` in 4 bytes, which sounds tight until you notice the palette is a hard-coded 256 slots for the whole scene. Everything is capped at 256 unique colors, period. It's also an authoring format, not a runtime one: you have to walk the scene, apply rotations, and build your own spatial data structure before a shader can touch it.
+- **`.vox` + gzip / `.rvox` + gzip** are just deflate-compressed blobs. They need decompression before anything else can look at them.
+
+`.rvox` is the format the GPU actually reads. `Renderer::upload_world` blits the file verbatim into two storage buffers (a chunk directory and the concatenated tree data), and the WGSL fragment shader walks that same bitpacked tree pointer-for-pointer, one popcount at a time. Nothing gets built on the way in; nothing gets translated. The 15.3 MB you see on disk is the 15.3 MB the GPU walks.
+
+And `.rvox` has no global palette cap. Each chunk carries its own palette LUT, and the per-voxel index bit width scales exactly with that chunk's palette size: a uniform chunk collapses to zero material bits, a two-material chunk uses 1 bit per voxel (MagicaVoxel needs 8 for the same chunk), a 100-material chunk uses 7. The whole world can carry as many distinct voxel values as it wants; each chunk pays only for the ones it actually uses. That's why `.rvox` is smaller than `.vox` even though `.vox` is already using palette indexing.
+
+Even without the "renderable" bonus, `.rvox` is **462x smaller** than the naive dense encoding and **20.6x smaller** than a sparse coord-list of non-air voxels. Gzipped, it's **1074x** smaller than dense.
+
+The compression comes for free from the tree layout: the palette LUT plus material-run dedup shave off 40% of the material entries (3.8 MB) all by themselves. The gzip row is what happens when you pile a normal deflate pass on top of that.
+
+![Per-pixel memory-read heatmap of the same castle view](rvox-heatmap.png)
+
+*Same castle view, colored by how many chunk-tree reads each ray did. Black is a full miss, purple is a few reads (interior of a solid chunk exits at depth 1), and the hot orange edges are grazing rays that had to descend deep and skip along many slot boundaries. Most of the frame stays cool because the tree lets a filled voxel resolve in one to three memory reads.*
 
 Single-material spheres show the extreme end of the sparse-tree story:
 
-| Shape                     | Voxels stored | Chunk size | Bytes / voxel |
-|:--------------------------|--------------:|-----------:|--------------:|
-| Sphere r=16               |      17,077   |    3.2 KB  |         0.192 |
-| Sphere r=32               |     137,065   |   12.0 KB  |         0.090 |
-| Sphere r=64               |   1,097,917   |   49.6 KB  |         0.046 |
-| Sphere r=96               |   3,705,093   |  111.8 KB  |         0.031 |
-| Sphere r=128              |   8,782,782   |  196.5 KB  |         0.023 |
-| Stone sphere w/ ember core|   8,782,782   |  264.7 KB  |         0.031 |
+| Shape                     | Voxels stored | Chunk size | Bytes / non-air voxel |
+|:--------------------------|--------------:|-----------:|----------------------:|
+| Sphere r=16               |      17,077   |    3.2 KB  |                 0.192 |
+| Sphere r=32               |     137,065   |   12.0 KB  |                 0.090 |
+| Sphere r=64               |   1,097,917   |   49.6 KB  |                 0.046 |
+| Sphere r=96               |   3,705,093   |  111.8 KB  |                 0.031 |
+| Sphere r=128              |   8,782,782   |  196.5 KB  |                 0.023 |
+| Stone sphere w/ ember core|   8,782,782   |  264.7 KB  |                 0.031 |
 
 An 8.8-million-voxel sphere fits in 197 KB. A trivial `[u32; 8_782_782]` for the same shape would be 33.5 MB, so we're 175x tighter than the naive path before you touch a general compressor.
 
@@ -211,6 +234,12 @@ Collapses the materials slab to near-zero for uniform-material regions. About 99
 Fixed-grid multi-chunk ray tracing. One storage buffer of concatenated chunk bytes, one directory buffer mapping grid position to chunk offset, one WGSL kernel that walks the tree per chunk and steps between chunks via directory lookups.
 
 ### Ray Tracing
+
+![2D diagram of the tree-DDA space-skipping algorithm](rvox-traversal.png)
+
+*One ray marching across a 2D 64-tree analogue. Green cells are large empty regions skipped in a single DDA step at their native scale; blue cells are populated regions the ray refines into. Numbers count the loop iterations, not voxels crossed. That's the shape of the algorithm the WGSL shader runs in 3D: descend only when the current slot has children, ascend by the highest changed bit when the position leaves the current cell, and let one iteration cross a whole empty subtree at once.*
+
+The current shader implements the tree DDA with an ancestor stack, per-cell space skipping, and clamp-to-neighbor robustness. The bullets below are the next round of optimisations pulled straight from the reference article:
 
 - DDA with an ancestor stack. Neighbor steps pop or push the stack instead of restarting from the chunk root.
 - O(1) common ancestor via diffbits. XOR old and new position, clz, index the stack.
