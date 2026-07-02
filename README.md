@@ -18,6 +18,71 @@ The core data structure is a compact bitpacked sparse tree, one per chunk, arran
 2. Heavy compression.
 3. Quick CPU-side edits.
 
+# Benchmarks
+
+All numbers below come from `cargo bench --bench bench_sphere` and the `vox_to_rvox` / `rvox_breakdown` binaries on `assets/castle.vox` (455 MagicaVoxel models, 22 million non-air voxels, no gzip on the source). Single Ryzen desktop, release build.
+
+## Compression
+
+The castle model in every file format we can compare against:
+
+| Format                          |     Size | Bytes / voxel | vs. raw `.vox` |
+|:--------------------------------|---------:|--------------:|---------------:|
+| MagicaVoxel `.vox` (raw)        |  84.1 MB |         4.008 |         1.00 x |
+| MagicaVoxel `.vox` + gzip -9    |  34.4 MB |         1.637 |         2.45 x |
+| ray-vox `.rvox` (this project)  |  15.3 MB |         0.728 |         5.51 x |
+| ray-vox `.rvox` + gzip -9       |   6.6 MB |         0.313 |        12.80 x |
+
+`.rvox` gets there without any general-purpose compressor: it's just the bitpacked tree written straight to disk, and the palette LUT plus material-run dedup shave off 40% of the material entries (3.8 MB) all by themselves. The gzip line is what happens when you pile a normal deflate pass on top.
+
+Single-material spheres show the extreme end of the sparse-tree story:
+
+| Shape                     | Voxels stored | Chunk size | Bytes / voxel |
+|:--------------------------|--------------:|-----------:|--------------:|
+| Sphere r=16               |      17,077   |    3.2 KB  |         0.192 |
+| Sphere r=32               |     137,065   |   12.0 KB  |         0.090 |
+| Sphere r=64               |   1,097,917   |   49.6 KB  |         0.046 |
+| Sphere r=96               |   3,705,093   |  111.8 KB  |         0.031 |
+| Sphere r=128              |   8,782,782   |  196.5 KB  |         0.023 |
+| Stone sphere w/ ember core|   8,782,782   |  264.7 KB  |         0.031 |
+
+An 8.8-million-voxel sphere fits in 197 KB. A trivial `[u32; 8_782_782]` for the same shape would be 33.5 MB, so we're 175x tighter than the naive path before you touch a general compressor.
+
+## Edit performance
+
+Building a chunk from scratch (baking a sphere edit into an empty 256^3 chunk):
+
+| Radius | Voxels touched | Median time | Voxels / second |
+|-------:|---------------:|------------:|-----------------|
+|     16 |        17,077  |   43 µs     |        400 M/s  |
+|     32 |       137,065  |  155 µs     |        880 M/s  |
+|     64 |     1,097,917  |  807 µs     |       1.36 G/s  |
+|     96 |     3,705,093  |  1.85 ms    |       2.00 G/s  |
+|    128 |     8,782,782  |  3.20 ms    |       2.74 G/s  |
+
+Carving air out of a fully-solid chunk runs at essentially the same speed (r=128 carve: 3.30 ms), because both paths funnel through the same `Sphere` classifier that prunes uniform regions above the leaf level.
+
+Single-voxel edits (random `Path`s into an empty chunk, cost dominated by tree construction):
+
+| Edit count | Median time |     Rate      |
+|-----------:|------------:|--------------:|
+|      1,000 |   770 µs    |    1.3 M/s    |
+|     10,000 |   5.3 ms    |    1.9 M/s    |
+|    100,000 |   23.9 ms   |    4.2 M/s    |
+
+## Import and I/O
+
+Full castle round trip (22M voxels):
+
+| Stage                                 | Time     |
+|:--------------------------------------|---------:|
+| `dot_vox` parse of 88 MB `.vox`       |    15 ms |
+| Import + bake into 62 chunks in parallel | 674 ms |
+| Serialize `.rvox` to disk (15.3 MB)   |   1.9 ms |
+| Load `.rvox` from disk into a World   |   2.3 ms |
+
+Loading castle at 2.3 ms means a warm-cache reload is effectively free; you'd hit disk bandwidth long before the parser noticed. The 674 ms import includes both the scene-graph traversal (rotation-aware, one shot) and the parallel tree construction, so total end-to-end throughput is around 32 million voxels / second even including the axis-aware placement math.
+
 # Implemented
 
 ## Chunks
