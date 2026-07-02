@@ -2,15 +2,14 @@ pub mod camera;
 pub mod gpu_world;
 
 use bytemuck::{Pod, Zeroable};
-use camera::OrbitCamera;
+use camera::Camera;
 use gpu_world::GpuWorldSnapshot;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
-// Data uploaded to the fragment shader every frame. Layout matches the WGSL
-// Uniforms struct in shaders/render.wgsl. All vec3s are padded to vec4 for
-// std140-compatible alignment.
+// Uploaded to the fragment shader every frame. Layout matches Uniforms in
+// shaders/render.wgsl; vec3s pad to vec4 for std140 alignment.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 struct Uniforms {
@@ -23,6 +22,27 @@ struct Uniforms {
 	resolution: [f32; 2],
 	fov_scale: f32,
 	aspect: f32,
+	render_mode: u32, // 0 = normal, 1 = heatmap
+	_padding: [u32; 3], // keeps the struct 16-byte aligned end-to-end
+}
+
+// What the fragment shader draws each pixel as.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum RenderMode {
+	// Ray-traced voxels with Lambert shading.
+	Normal,
+	// Per-pixel memory-read heatmap: black is cold, then purple, magenta,
+	// orange, and finally white for the hottest rays (typically grazing).
+	Heatmap,
+}
+
+impl RenderMode {
+	fn as_uniform(self) -> u32 {
+		match self {
+			RenderMode::Normal => 0,
+			RenderMode::Heatmap => 1,
+		}
+	}
 }
 
 pub struct Renderer {
@@ -39,6 +59,7 @@ pub struct Renderer {
 	directory_buffer: Option<wgpu::Buffer>,
 	chunk_data_buffer: Option<wgpu::Buffer>,
 	snapshot: Option<GpuWorldSnapshot>,
+	render_mode: RenderMode,
 }
 
 impl Renderer {
@@ -86,13 +107,30 @@ impl Renderer {
 			.find(|f| f.is_srgb())
 			.unwrap_or(surface_caps.formats[0]);
 
+		// Prefer an uncapped present mode so FPS reflects real throughput,
+		// not display refresh. Mailbox (uncapped, no tearing) beats Immediate
+		// (uncapped, tears); Fifo (vsync-capped) is the final fallback.
+		let present_mode = if surface_caps
+			.present_modes
+			.contains(&wgpu::PresentMode::Mailbox)
+		{
+			wgpu::PresentMode::Mailbox
+		} else if surface_caps
+			.present_modes
+			.contains(&wgpu::PresentMode::Immediate)
+		{
+			wgpu::PresentMode::Immediate
+		} else {
+			wgpu::PresentMode::Fifo
+		};
+
 		let window_size = window.inner_size();
 		let surface_config = wgpu::SurfaceConfiguration {
 			usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
 			format: surface_format,
 			width: window_size.width.max(1),
 			height: window_size.height.max(1),
-			present_mode: wgpu::PresentMode::Fifo,
+			present_mode,
 			desired_maximum_frame_latency: 2,
 			alpha_mode: surface_caps.alpha_modes[0],
 			view_formats: Vec::new(),
@@ -201,7 +239,16 @@ impl Renderer {
 			directory_buffer: None,
 			chunk_data_buffer: None,
 			snapshot: None,
+			render_mode: RenderMode::Normal,
 		}
+	}
+
+	pub fn set_render_mode(&mut self, mode: RenderMode) {
+		self.render_mode = mode;
+	}
+
+	pub fn render_mode(&self) -> RenderMode {
+		self.render_mode
 	}
 
 	pub fn window(&self) -> &Window {
@@ -223,8 +270,8 @@ impl Renderer {
 		self.surface.configure(&self.device, &self.surface_config);
 	}
 
-	// Upload a World snapshot and rebuild the bind group. Call this once per
-	// world change; the shader reads the two storage buffers every frame.
+	// Upload a World snapshot and rebuild the bind group. Call once per world
+	// change; the shader reads the two storage buffers on every draw.
 	pub fn upload_world(&mut self, snapshot: GpuWorldSnapshot) {
 		let directory_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
 			label: Some("ray-vox chunk directory"),
@@ -263,10 +310,9 @@ impl Renderer {
 		self.snapshot = Some(snapshot);
 	}
 
-	pub fn render(&mut self, camera: &OrbitCamera) -> Result<(), wgpu::SurfaceError> {
+	pub fn render(&mut self, camera: &Camera) -> Result<(), wgpu::SurfaceError> {
 		let Some(bind_group) = self.bind_group.as_ref() else {
-			// No world uploaded yet; skip rendering silently.
-			return Ok(());
+			return Ok(()); // no world uploaded yet
 		};
 
 		let uniforms = self.build_uniforms(camera);
@@ -308,7 +354,7 @@ impl Renderer {
 		Ok(())
 	}
 
-	fn build_uniforms(&self, camera: &OrbitCamera) -> Uniforms {
+	fn build_uniforms(&self, camera: &Camera) -> Uniforms {
 		let world_origin = self
 			.snapshot
 			.as_ref()
@@ -337,6 +383,8 @@ impl Renderer {
 			resolution,
 			fov_scale: camera.fov_scale(),
 			aspect: camera.aspect,
+			render_mode: self.render_mode.as_uniform(),
+			_padding: [0; 3],
 		}
 	}
 }

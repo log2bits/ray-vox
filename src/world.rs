@@ -12,9 +12,8 @@ use crate::generate::Edit;
 use crate::util::types::{Aabb, ChunkId, CHUNK_SIZE, WorldPos};
 use std::sync::Arc;
 
-// A fixed 3D grid of chunks in world space. The grid covers
-// [origin, origin + chunk_grid_dim * CHUNK_SIZE) along each axis.
-// Chunk slots are either baked (Some) or empty air (None).
+// Fixed 3D grid of chunks. Covers [origin, origin + grid_dim * CHUNK_SIZE).
+// A slot is Some(chunk) when baked and None for empty air.
 pub struct World {
 	pub chunk_grid_dim: [u32; 3],
 	pub origin: WorldPos,
@@ -45,8 +44,7 @@ impl World {
 		self.chunks.len()
 	}
 
-	// Flatten a 3D grid position into the storage index. Returns None if the
-	// position is out of bounds.
+	// Flatten a grid position to a chunks index, or None if out of bounds.
 	pub fn slot_index(&self, grid_pos: [u32; 3]) -> Option<usize> {
 		if grid_pos[0] >= self.chunk_grid_dim[0]
 			|| grid_pos[1] >= self.chunk_grid_dim[1]
@@ -98,8 +96,7 @@ impl World {
 		}
 	}
 
-	// Apply an edit to every grid cell whose chunk AABB overlaps its bounds,
-	// baking each affected chunk in place.
+	// Bake the edit into every chunk whose AABB overlaps the edit's bounds.
 	pub fn apply_edit(&mut self, edit: Arc<dyn Edit>) {
 		let bounds = edit.bounds();
 		let [lo, hi] = self.grid_range_for_bounds(bounds);
@@ -117,8 +114,7 @@ impl World {
 		self.edits.push(edit);
 	}
 
-	// The rectangular subset of grid cells whose AABBs intersect `bounds`,
-	// clamped to the grid. Returns `[lo, hi)` exclusive-upper ranges.
+	// Grid range [lo, hi) whose chunk AABBs intersect bounds, clamped to grid.
 	fn grid_range_for_bounds(&self, bounds: Aabb) -> [[u32; 3]; 2] {
 		let mut lo = [0u32; 3];
 		let mut hi = [0u32; 3];

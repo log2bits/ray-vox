@@ -36,9 +36,8 @@ struct LeafData {
 	materials: [Material; 64],
 }
 
-// The Arena holds the tree as it's built cell-by-cell from the Source.
-// Nodes are placed by push order and referenced by index. Once the tree is
-// complete, the Serializer walks it and produces the final Chunk layout.
+// Scratch tree built cell-by-cell from the Source. Nodes are indexed by push
+// order; the Serializer walks it afterward to produce the final Chunk layout.
 #[derive(Default)]
 struct Arena {
 	leaves: Vec<LeafData>,
@@ -61,9 +60,8 @@ impl Arena {
 	}
 }
 
-// Collapse a slot's 64 children into a single Child. Uniform-filled children
-// collapse into a Filled cell; a mix of Filled cells becomes a Leaf; anything
-// containing an Interior or Leaf gets stored as an interior node.
+// Collapse 64 child cells to one Child. All same material -> Filled; mix of
+// Filled/Empty only -> Leaf; anything nested -> Interior.
 fn classify_children(arena: &mut Arena, children: [Child; 64]) -> Child {
 	let mut has_any = false;
 	let mut has_nested = false;
@@ -171,19 +169,17 @@ fn build_leaf<S: Source>(arena: &mut Arena, source: &S, lo: [i32; 3]) -> Child {
 	arena.push_leaf(LeafData { occupancy, materials })
 }
 
-// Walks the arena tree and writes a Chunk in the on-disk layout. Every parent
-// interior node stores its interior and leaf children contiguously in the
-// output arrays (indexed by popcount), so we hold each intermediate node
-// aside until its parent copies it into place.
+// Lowers the arena tree into the packed on-disk Chunk layout. Each parent
+// stores its interior and leaf children contiguously in the output arrays
+// (indexed by popcount), so we stage each child aside until the parent copies
+// it into place.
 struct Serializer {
 	staged_interiors: Vec<InteriorNode>,
 	staged_leaves: Vec<LeafNode>,
 	out_interiors: Vec<InteriorNode>,
 	out_leaves: Vec<LeafNode>,
 	out_materials: PalettedVec<Material>,
-	// A raw mirror of out_materials so material-run dedup can compare entries
-	// without going through the palette LUT. Dropped when the chunk finalises.
-	raw_materials: Vec<Material>,
+	raw_materials: Vec<Material>, // parallel view of out_materials for dedup compares
 	run_index: AHashMap<u64, u32>,
 }
 
@@ -200,10 +196,8 @@ impl Serializer {
 		}
 	}
 
-	// Two-tier material-run dedup. First try an exact full-run match via a
-	// hash index. If that misses, look at the tail of the array for the
-	// longest overlap with the head of this run, and append only the missing
-	// suffix. Together they collapse uniform-material regions to near-zero.
+	// Emit a material run with two-tier dedup: exact-hash first, then
+	// tail-overlap extend on miss. Collapses uniform regions to near zero.
 	fn emit_material_run(&mut self, run: &[Material]) -> u32 {
 		let full_hash = hash_run(run);
 		if let Some(&offset) = self.run_index.get(&full_hash) {
@@ -240,9 +234,8 @@ impl Serializer {
 		&self.raw_materials[start..start + run.len()] == run
 	}
 
-	// Lower an arena cell to its serialised form. Returns a Child pointing
-	// into staged_leaves / staged_interiors. Empty and Filled cells pass
-	// through unchanged since they carry no node storage.
+	// Lower an arena cell into staged storage. Empty and Filled pass through
+	// unchanged; Leaf and Interior return a Child pointing at the staged slot.
 	fn lower(&mut self, arena: &Arena, cell: Child) -> Child {
 		match cell {
 			Child::Empty => Child::Empty,
@@ -277,9 +270,8 @@ impl Serializer {
 					masks.set_state(slot, child.state());
 				}
 
-				// Copy this parent's interior and leaf children into the
-				// output arrays contiguously, in slot order. The popcount
-				// scheme on the parent's masks will index into these ranges.
+				// Copy this parent's children into out_ contiguously in slot
+				// order so the popcount scheme on masks indexes into them.
 				let interior_ptr = self.out_interiors.len() as u32;
 				let leaf_ptr = self.out_leaves.len() as u32;
 				for slot in masks.interiors().iter_slots() {
@@ -293,9 +285,8 @@ impl Serializer {
 					}
 				}
 
-				// The material run for an interior stores only its filled
-				// children. Interior and leaf slots don't need a material at
-				// this level because the child node holds its own materials.
+				// Material run only carries filled cells. Interior/leaf slots
+				// let the child node carry its own materials.
 				let mut run = [Material::air(); 64];
 				let mut run_len = 0;
 				for slot in masks.filled().iter_slots() {
@@ -321,8 +312,8 @@ pub fn build_chunk<S: Source>(source: &S) -> Chunk {
 	let mut arena = Arena::default();
 	let root = build_cell(&mut arena, source, [0, 0, 0], CHUNK_SIZE, 0);
 
-	// Empty and uniform chunks skip node storage entirely. A uniform chunk
-	// stores just its single material at materials[0].
+	// Empty and uniform chunks skip node storage; a uniform chunk keeps only
+	// its single material at materials[0].
 	if let Child::Empty = root {
 		return Chunk::new();
 	}
@@ -340,7 +331,7 @@ pub fn build_chunk<S: Source>(source: &S) -> Chunk {
 	let mut serializer = Serializer::new();
 	let root_cell = serializer.lower(&arena, root);
 
-	// The root node has no parent to copy it into place, so we push it here.
+	// The root has no parent to copy it into place; push it directly.
 	match root_cell {
 		Child::Interior(staged_index) => {
 			serializer.out_interiors.push(serializer.staged_interiors[staged_index as usize]);

@@ -19,13 +19,13 @@ pub enum CellState {
 	Leaf,
 }
 
-/// Pack the low 2 bits of x,y,z into the 6-bit slot index used by 64-tree nodes.
+// Pack the low 2 bits of x, y, z into a 6-bit slot index used by 64-tree nodes.
 #[inline]
 pub fn pack_slot(v: [i32; 3]) -> u8 {
 	(((v[0] & 3) << 4) | ((v[1] & 3) << 2) | (v[2] & 3)) as u8
 }
 
-/// Inverse of `pack_slot`: extract `(x, y, z)` from a 6-bit slot index.
+// Inverse of pack_slot: extract (x, y, z) from a 6-bit slot index.
 #[inline]
 pub fn unpack_slot(slot: u8) -> [i32; 3] {
 	[((slot >> 4) & 3) as i32, ((slot >> 2) & 3) as i32, (slot & 3) as i32]
@@ -100,8 +100,8 @@ impl ChildMasks {
 		self.leaves().popcount_below(slot)
 	}
 
-	// Interior nodes only store materials for cells in the Filled state, so
-	// the material rank counts filled slots below the target slot.
+	// Interior nodes store materials for Filled cells only; count filled slots
+	// below the target slot.
 	#[inline]
 	pub fn material_rank(&self, slot: u8) -> u32 {
 		self.filled().popcount_below(slot)
@@ -112,8 +112,7 @@ impl ChildMasks {
 #[derive(Copy, Clone, Default, Pod, Zeroable)]
 pub struct InteriorNode {
 	pub masks: ChildMasks,
-	// Bits 0..13 hold interior_ptr, bits 13..32 hold leaf_ptr.
-	node_offsets: u32,
+	node_offsets: u32,   // low 13 bits: interior_ptr, high 19 bits: leaf_ptr
 	material_offset: u32,
 }
 

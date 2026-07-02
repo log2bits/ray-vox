@@ -11,11 +11,9 @@ pub trait LocalEdit: Send {
 	fn voxel(&self, v: [i32; 3]) -> VoxelSample;
 }
 
-/// Implement `LocalEdit` for a `Source` by delegating `classify`/`voxel` to the
-/// `Source` impl. Caller supplies the `bounds_local` body.
-///
-/// Used because `Source` requires `Sized + Clone` (so it can't be dyn-safe),
-/// while `LocalEdit` is the dyn-safe form `CompositeSource` stores.
+// Impl LocalEdit for a Source by forwarding classify/voxel; caller provides
+// the bounds_local body. LocalEdit is the dyn-safe form CompositeSource
+// stores, while Source needs Sized + Clone.
 #[macro_export]
 macro_rules! impl_local_edit {
 	($ty:ty, |$self_:ident| $bounds:expr $(,)?) => {

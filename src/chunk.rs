@@ -60,8 +60,7 @@ impl Chunk {
 		self.interior_nodes.is_empty() && self.leaf_nodes.is_empty() && self.materials.is_empty()
 	}
 
-	// The material of a uniform chunk (no nodes, exactly one material entry).
-	// Panics if called on a non-uniform chunk.
+	// The single material of a uniform chunk. Panics if not uniform.
 	pub fn uniform_material(&self) -> Material {
 		debug_assert!(self.is_uniform(), "uniform_material called on non-uniform chunk");
 		self.materials.get(0)
@@ -71,10 +70,9 @@ impl Chunk {
 		(self.interior_nodes.len() - 1) as u32
 	}
 
-	/// The `Child` representing this chunk's root cell.
-	///
-	/// Collapses the four storage shapes (empty, uniform, single leaf at root,
-	/// or interior tree) into one state for downstream traversal.
+	// The Child at the chunk's root cell. Collapses the four storage shapes
+	// (empty, uniform, single-leaf root, interior tree) into one enum for
+	// downstream traversal.
 	pub fn root_child(&self) -> Child {
 		if self.is_empty() {
 			Child::Empty
@@ -106,9 +104,9 @@ impl Chunk {
 		}
 	}
 
-	/// Descend one tree level from `state` through `slot`. Empty/Filled propagate
-	/// unchanged; Interior reads the child; Leaf reads the leaf-slot's voxel and
-	/// collapses to Empty (air) or Filled.
+	// Descend one tree level from state through slot. Empty and Filled pass
+	// through unchanged; Interior reads the child; Leaf reads the voxel at
+	// the slot and collapses to Empty (air) or Filled.
 	pub fn descend_child(&self, state: Child, slot: u8) -> Child {
 		match state {
 			Child::Empty => Child::Empty,
@@ -125,7 +123,7 @@ impl Chunk {
 		}
 	}
 
-	/// Voxel sample for the cell at `slot` inside a depth-3 leaf.
+	// Sample the voxel at slot inside a depth-3 leaf.
 	pub fn leaf_voxel_sample(&self, leaf_idx: u32, slot: u8) -> VoxelSample {
 		match self.leaf_voxel(&self.leaf_nodes[leaf_idx as usize], slot) {
 			m if m.is_air() => VoxelSample::Passthrough,

@@ -1,75 +1,80 @@
-// A simple orbit camera. The eye orbits around a target point at a fixed
-// distance. Yaw rotates around the Y axis, pitch rotates around the horizon.
-// The renderer reads out the eye position and the three basis vectors.
-pub struct OrbitCamera {
-	pub target: [f32; 3],
-	pub distance: f32,
+// Free-flying first-person camera. Yaw is rotation around world-up (Y); at
+// yaw = 0 the camera looks along +Z, and positive yaw turns clockwise from
+// above. Pitch tilts up/down and gets clamped by the input handler to avoid
+// gimbal flip.
+pub struct Camera {
+	pub position: [f32; 3],
 	pub yaw: f32,
 	pub pitch: f32,
 	pub fov_y: f32,
 	pub aspect: f32,
 }
 
-impl OrbitCamera {
-	pub fn new(target: [f32; 3], distance: f32) -> Self {
+impl Camera {
+	pub fn new(position: [f32; 3]) -> Self {
 		Self {
-			target,
-			distance,
+			position,
 			yaw: 0.0,
-			pitch: 0.3,
+			pitch: 0.0,
 			fov_y: 60f32.to_radians(),
 			aspect: 1.0,
 		}
 	}
 
 	pub fn eye(&self) -> [f32; 3] {
+		self.position
+	}
+
+	pub fn forward(&self) -> [f32; 3] {
 		let cos_pitch = self.pitch.cos();
 		let sin_pitch = self.pitch.sin();
 		let cos_yaw = self.yaw.cos();
 		let sin_yaw = self.yaw.sin();
-		[
-			self.target[0] + self.distance * cos_pitch * sin_yaw,
-			self.target[1] + self.distance * sin_pitch,
-			self.target[2] + self.distance * cos_pitch * cos_yaw,
-		]
+		[cos_pitch * sin_yaw, sin_pitch, cos_pitch * cos_yaw]
 	}
 
-	// Unit vector pointing from the eye toward the target.
-	pub fn forward(&self) -> [f32; 3] {
-		let eye = self.eye();
-		let dx = self.target[0] - eye[0];
-		let dy = self.target[1] - eye[1];
-		let dz = self.target[2] - eye[2];
-		let length = (dx * dx + dy * dy + dz * dz).sqrt().max(1e-6);
-		[dx / length, dy / length, dz / length]
-	}
-
-	// Right basis vector (cross of forward and world-up), unit length.
 	pub fn right(&self) -> [f32; 3] {
-		let f = self.forward();
-		let world_up = [0.0f32, 1.0, 0.0];
-		let x = f[1] * world_up[2] - f[2] * world_up[1];
-		let y = f[2] * world_up[0] - f[0] * world_up[2];
-		let z = f[0] * world_up[1] - f[1] * world_up[0];
-		let length = (x * x + y * y + z * z).sqrt().max(1e-6);
-		[x / length, y / length, z / length]
+		let cos_yaw = self.yaw.cos();
+		let sin_yaw = self.yaw.sin();
+		[cos_yaw, 0.0, -sin_yaw]
 	}
 
-	// Camera-up basis vector, unit length. Computed as right x forward so it
-	// stays orthogonal even when the camera pitches.
 	pub fn up(&self) -> [f32; 3] {
-		let f = self.forward();
-		let r = self.right();
+		let forward = self.forward();
+		let right = self.right();
 		[
-			r[1] * f[2] - r[2] * f[1],
-			r[2] * f[0] - r[0] * f[2],
-			r[0] * f[1] - r[1] * f[0],
+			forward[1] * right[2] - forward[2] * right[1],
+			forward[2] * right[0] - forward[0] * right[2],
+			forward[0] * right[1] - forward[1] * right[0],
 		]
 	}
 
-	// Half-tangent of the vertical field of view, used by the shader to scale
-	// pixel offsets into ray directions.
 	pub fn fov_scale(&self) -> f32 {
 		(self.fov_y * 0.5).tan()
+	}
+
+	pub fn translate_forward(&mut self, distance: f32) {
+		let forward = self.forward();
+		self.position[0] += forward[0] * distance;
+		self.position[1] += forward[1] * distance;
+		self.position[2] += forward[2] * distance;
+	}
+
+	pub fn translate_right(&mut self, distance: f32) {
+		let right = self.right();
+		self.position[0] += right[0] * distance;
+		self.position[1] += right[1] * distance;
+		self.position[2] += right[2] * distance;
+	}
+
+	pub fn translate_world_up(&mut self, distance: f32) {
+		self.position[1] += distance;
+	}
+
+	// Apply mouse-motion yaw and pitch deltas; pitch clamps clear of the poles.
+	pub fn apply_look_delta(&mut self, yaw_delta: f32, pitch_delta: f32) {
+		self.yaw += yaw_delta;
+		let pitch_limit = std::f32::consts::FRAC_PI_2 - 0.01;
+		self.pitch = (self.pitch + pitch_delta).clamp(-pitch_limit, pitch_limit);
 	}
 }

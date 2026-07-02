@@ -1,18 +1,12 @@
 use crate::Chunk;
 use crate::world::World;
 
-// A directory entry of this value means the corresponding grid cell has no
-// chunk data. The shader treats it as air.
+// Directory entry meaning "no chunk here"; the shader reads it as air.
 pub const EMPTY_CHUNK_SENTINEL: u32 = u32::MAX;
 
-// A CPU-side snapshot of a World laid out ready for GPU upload. The renderer
-// takes this and copies it verbatim into two storage buffers.
-//
-// Layout:
-//   directory[flat_grid_index] -> starting u32 offset into chunk_data, or
-//                                 EMPTY_CHUNK_SENTINEL.
-//   chunk_data                 -> concatenated per-chunk blobs, each in the
-//                                 same format Chunk::write_bytes produces.
+// CPU snapshot of a World laid out for GPU upload. directory[flat_grid_index]
+// holds a word offset into chunk_data (or the empty sentinel), and chunk_data
+// is per-chunk blobs concatenated in Chunk::write_bytes format.
 pub struct GpuWorldSnapshot {
 	pub chunk_grid_dim: [u32; 3],
 	pub world_origin: [f32; 3],
@@ -33,8 +27,7 @@ impl GpuWorldSnapshot {
 			append_chunk_words(&mut chunk_data, chunk);
 		}
 
-		// Storage buffers must have at least one word; pad if the world is
-		// completely empty.
+		// Storage buffers need at least one word; pad if the world was empty.
 		if chunk_data.is_empty() {
 			chunk_data.push(0);
 		}
@@ -62,14 +55,13 @@ impl GpuWorldSnapshot {
 	}
 }
 
-// Serialize a single chunk into the shared chunk_data buffer. Uses
-// Chunk::write_bytes so the CPU and GPU formats stay in lockstep.
+// Append one chunk to the shared word buffer via Chunk::write_bytes so CPU,
+// disk, and GPU formats stay in lockstep.
 fn append_chunk_words(chunk_data: &mut Vec<u32>, chunk: &Chunk) {
 	let mut bytes: Vec<u8> = Vec::with_capacity(chunk.byte_size() as usize);
 	chunk.write_bytes(&mut bytes).expect("chunk serialization to Vec<u8> cannot fail");
 
-	// The on-disk chunk layout is all u32-aligned fields, so the byte count is
-	// always a multiple of 4. Reinterpret directly.
+	// Chunk layout is entirely u32-aligned, so bytes.len() is a multiple of 4.
 	debug_assert!(bytes.len() % 4 == 0, "chunk byte size must be multiple of 4");
 	let word_count = bytes.len() / 4;
 	let base = chunk_data.len();

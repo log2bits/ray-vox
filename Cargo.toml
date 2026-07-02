@@ -2,6 +2,7 @@
 name = "ray-vox"
 version = "0.1.0"
 edition = "2024"
+default-run = "ray-vox"
 
 [lib]
 path = "src/lib.rs"
@@ -17,6 +18,8 @@ profiling = "1.0.17"
 rand = { version = "0.8", features = ["small_rng"] }
 radsort = "0.1"
 rayon = "1"
+env_logger = "0.11"
+log = "0.4"
 wgpu = "23"
 winit = "0.30"
 egui = "0.30"

@@ -29,19 +29,11 @@ impl std::fmt::Display for RvoxError {
 
 impl std::error::Error for RvoxError {}
 
-// The file format is:
-//   MAGIC (4)
-//   VERSION (4)
-//   chunk_grid_dim (3 x u32)
-//   world_origin (3 x i32)
-//   non_empty_chunk_count (u32)
-//   for each non-empty chunk:
-//     grid_pos (3 x u32)
-//     chunk bytes (see Chunk::write_bytes)
-//
-// Header fields are little-endian. Chunk node and material bytes are
-// bytemuck-cast native-endian, so files are only portable across
-// little-endian hosts (fine in practice for x86 and aarch64).
+// File layout: MAGIC, VERSION, chunk_grid_dim (3 u32), world_origin (3 i32),
+// non_empty_count (u32), then per non-empty chunk: grid_pos (3 u32) followed
+// by Chunk::write_bytes output. Header fields are little-endian. Chunk node
+// and material bytes are bytemuck-cast native-endian, so files are only
+// portable across little-endian hosts (fine for x86 and aarch64).
 impl World {
 	pub fn save_rvox<W: Write>(&self, w: &mut W) -> Result<(), RvoxError> {
 		w.write_all(MAGIC)?;

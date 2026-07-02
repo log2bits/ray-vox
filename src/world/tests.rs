@@ -189,8 +189,11 @@ fn import_vox_from_synthetic_bytes_builds_a_world() {
 
 	let world = crate::import::vox::import_vox(&bytes).expect("import");
 	let chunk = world.chunk_at([0, 0, 0]).expect("origin chunk populated");
-	let red = chunk.voxel_at(ChunkPos::new(1, 2, 3));
-	let blue = chunk.voxel_at(ChunkPos::new(5, 6, 7));
+	// The importer swaps Y and Z to convert MagicaVoxel Z-up into ray-vox
+	// Y-up, so MV voxel (1, 2, 3) lands at ray-vox (1, 3, 2), and (5, 6, 7)
+	// lands at (5, 7, 6).
+	let red = chunk.voxel_at(ChunkPos::new(1, 3, 2));
+	let blue = chunk.voxel_at(ChunkPos::new(5, 7, 6));
 	assert_ne!(red, Material::air());
 	assert_ne!(blue, Material::air());
 	assert_ne!(red, blue);

@@ -2,8 +2,7 @@ use bytemuck::{Pod, Zeroable};
 use std::array::from_fn;
 use std::ops::{Add, BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Index, Mul, Not, Sub};
 
-// A single chunk covers this many voxels along each axis. Chunk-local coords
-// fit in u8, so this needs to be 256.
+// Voxels along one axis in a chunk. Fixed at 256 so chunk-local coords fit in u8.
 pub const CHUNK_SIZE: i32 = 256;
 
 #[repr(transparent)]
@@ -172,14 +171,14 @@ impl WorldPos {
 		WorldPos(from_fn(f))
 	}
 
-	// World-space origin of the chunk that contains this position.
+	// The chunk that contains this world position.
 	pub fn chunk_id(self) -> ChunkId {
 		ChunkId {
 			origin: self.map(|c| align_down(c, CHUNK_SIZE)),
 		}
 	}
 
-	// Position of this voxel inside its chunk.
+	// This position expressed as a chunk-local (u8, u8, u8).
 	pub fn chunk_pos(self, chunk_origin: WorldPos) -> ChunkPos {
 		ChunkPos::from_fn(|i| (self[i] - chunk_origin[i]) as u8)
 	}
@@ -269,8 +268,8 @@ impl Index<usize> for ChunkPos {
 	}
 }
 
-// Identifies a single chunk by the world-space corner of its bounding box.
-// The chunk covers `[origin, origin + CHUNK_SIZE)` along each axis.
+// One chunk, identified by the world-space corner of its bounding box. The
+// chunk covers [origin, origin + CHUNK_SIZE) along each axis.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ChunkId {
 	pub origin: WorldPos,

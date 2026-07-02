@@ -7,8 +7,8 @@ use crate::util::types::{ChunkId, CHUNK_SIZE, WorldPos};
 use rayon::prelude::*;
 use std::collections::HashMap;
 
-// A single voxel write at a world-space position. The batch entry point for
-// building a World from many voxels at once (used by the vox importer).
+// One voxel write at a world-space position. Batch entry point for the
+// vox importer and any other bulk-voxel loader.
 #[derive(Clone, Copy)]
 pub struct WorldEdit {
 	pub pos: WorldPos,
@@ -16,20 +16,18 @@ pub struct WorldEdit {
 }
 
 impl World {
-	// Build a World sized to fit all the given edits. The grid origin snaps
-	// down to a chunk boundary, and the grid dimensions cover every chunk
-	// touched by the edit bounds. Chunks are baked in parallel with rayon.
+	// Build a World sized to fit the edit bounds, then bake chunks in parallel.
 	pub fn from_edits(edits: Vec<WorldEdit>) -> World {
 		if edits.is_empty() {
 			return World::new([0, 0, 0]);
 		}
 
 		let (world_min, world_max_exclusive) = world_bounds(&edits);
-		let origin = world_min.chunk_id().origin;
+		let origin = world_min.chunk_id().origin; // snap to a chunk boundary
 		let chunk_grid_dim = grid_dim_for_bounds(origin, world_max_exclusive);
 
-		// Group edits by which chunk they land in. Sequential accumulation
-		// dominates on realistic inputs (millions of tiny hashmap inserts).
+		// Group edits by chunk. Sequential inserts dominate here since even
+		// millions of hashmap ops finish well before the per-chunk bake.
 		let mut per_chunk: HashMap<ChunkId, EditPacket> = HashMap::new();
 		for edit in edits {
 			let chunk_id = edit.pos.chunk_id();
@@ -40,7 +38,6 @@ impl World {
 				.push(Path::from_coords(local, 4), edit.material);
 		}
 
-		// Bake each chunk in parallel.
 		let baked: Vec<(ChunkId, Chunk)> = per_chunk
 			.into_par_iter()
 			.filter_map(|(chunk_id, mut packet)| {

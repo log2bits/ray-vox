@@ -16,8 +16,7 @@ impl Sphere {
 		Self { center, radius, material }
 	}
 
-	// Convert this sphere into chunk-local coordinates. Returns None when the
-	// sphere has non-positive radius and therefore covers no voxels.
+	// Project into chunk-local coordinates. None if the sphere is empty.
 	pub fn local(&self, chunk: ChunkId) -> Option<LocalSphere> {
 		if self.radius <= 0 {
 			return None;
