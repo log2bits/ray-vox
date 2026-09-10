@@ -1,10 +1,10 @@
 # ray-vox
 
-A voxel renderer that ray traces everything (no rasterization). Rust + WebGPU.
+I built ray-vox to be a fully ray traced voxel renderer written in Rust and WebGPU. No rasterization.
 
 ![Per-pixel memory-read heatmap of castle.vox](rvox-heatmap.png)
 
-*Per-pixel memory-read heatmap of castle.vox. Black is a full miss, purple is a shallow tree walk (a filled chunk resolves in one to three reads), and the hot orange edges are grazing rays that had to descend deep and skip along many slot boundaries. The tree earns its keep everywhere the frame stays cool.*
+*Per-pixel memory-read heatmap of castle.vox. Black is a full miss. Purple is a shallow tree walk, since a filled chunk resolves in one to three reads. The hot orange edges are grazing rays that had to descend deep and skip along many slot boundaries. The tree earns its keep everywhere the frame stays cool.*
 
 The core data structure is a compact bitpacked sparse tree, one per chunk, arranged in a fixed 3D grid on the GPU. I call it a CBEPSV64:
 
@@ -43,12 +43,12 @@ The first four rows are simpler ways you could try to store the same data. None 
 
 - **Dense `[u8; 3]`** is a flat 3D array indexed by `(x, y, z)`. Lookup is O(1) so it *is* trivially renderable in principle, except it's 6.89 GB. No consumer GPU has that much VRAM to hand a fragment shader.
 - **Sparse `([u32; 3], [u8; 3])`** is a list of coordinates plus RGB, one entry per occupied voxel. There's no spatial index, so a ray tracer would have to scan the whole 22M-entry list for every ray step, or you'd need to build a completely separate acceleration structure on top before you could render anything.
-- **MagicaVoxel `.vox`** is a scene graph of transforms, groups, and per-model voxel arrays. Every voxel is stored as `(x, y, z, palette_index)` in 4 bytes, which sounds tight until you notice the palette is a hard-coded 256 slots for the whole scene. Everything is capped at 256 unique colors, period. It's also an authoring format, not a runtime one: you have to walk the scene, apply rotations, and build your own spatial data structure before a shader can touch it.
-- **`.vox` + gzip / `.rvox` + gzip** are just deflate-compressed blobs. They need decompression before anything else can look at them.
+- **MagicaVoxel `.vox`** is a scene graph of transforms, groups, and per-model voxel arrays. Every voxel is stored as `(x, y, z, palette_index)` in 4 bytes, which sounds tight until you notice the palette is a hard-coded 256 slots for the whole scene. Everything is capped at 256 unique colors, period. It's also an authoring format rather than a runtime one. You have to walk the scene, apply rotations, and build your own spatial data structure before a shader can use it.
+- **`.vox` + gzip / `.rvox` + gzip** are just deflate-compressed blobs. They need decompression before you can do anything useful with them.
 
-`.rvox` is the format the GPU actually reads. `Renderer::upload_world` blits the file verbatim into two storage buffers (a chunk directory and the concatenated tree data), and the WGSL fragment shader walks that same bitpacked tree pointer-for-pointer, one popcount at a time. Nothing gets built on the way in; nothing gets translated. The 15.3 MB you see on disk is the 15.3 MB the GPU walks.
+`.rvox` is the format the GPU actually reads. `Renderer::upload_world` blits the file verbatim into two storage buffers, a chunk directory and the concatenated tree data. The WGSL fragment shader then walks that same bitpacked tree pointer-for-pointer, one popcount at a time. It doesn't get built or translated on the way in. The 15.3 MB on disk is the 15.3 MB the GPU walks.
 
-And `.rvox` has no global palette cap. Each chunk carries its own palette LUT, and the per-voxel index bit width scales exactly with that chunk's palette size: a uniform chunk collapses to zero material bits, a two-material chunk uses 1 bit per voxel (MagicaVoxel needs 8 for the same chunk), a 100-material chunk uses 7. The whole world can carry as many distinct voxel values as it wants; each chunk pays only for the ones it actually uses. That's why `.rvox` is smaller than `.vox` even though `.vox` is already using palette indexing.
+And `.rvox` has no global palette cap. Each chunk carries its own palette LUT, and the per-voxel index bit width scales exactly with that chunk's palette size. A uniform chunk collapses to zero material bits. A two-material chunk uses 1 bit per voxel, where MagicaVoxel needs 8 for the same chunk. A 100-material chunk uses 7. So the whole world can carry as many distinct voxel values as it wants, and each chunk pays only for the ones it uses. That's why `.rvox` is smaller than `.vox` even though `.vox` is already using palette indexing.
 
 Even without the "renderable" bonus, `.rvox` is **462x smaller** than the naive dense encoding and **20.6x smaller** than a sparse coord-list of non-air voxels. Gzipped, it's **1074x** smaller than dense.
 
@@ -104,7 +104,7 @@ Full castle round trip (22M voxels):
 | Serialize `.rvox` to disk (15.3 MB)   |   1.9 ms |
 | Load `.rvox` from disk into a World   |   2.3 ms |
 
-Loading castle at 2.3 ms means a warm-cache reload is effectively free; you'd hit disk bandwidth long before the parser noticed. The 674 ms import includes both the scene-graph traversal (rotation-aware, one shot) and the parallel tree construction, so total end-to-end throughput is around 32 million voxels / second even including the axis-aware placement math.
+Loading castle at 2.3 ms means a warm-cache reload is effectively free. Disk bandwidth is the limit there, not the parser. The 674 ms import covers both the scene-graph traversal, which is rotation-aware and runs once, and the parallel tree construction. End-to-end that's around 32 million voxels a second, including the axis-aware placement math.
 
 # Implemented
 
@@ -231,7 +231,7 @@ Collapses the materials slab to near-zero for uniform-material regions. About 99
 
 ## Renderer
 
-Fixed-grid multi-chunk ray tracing. One storage buffer of concatenated chunk bytes, one directory buffer mapping grid position to chunk offset, one WGSL kernel that walks the tree per chunk and steps between chunks via directory lookups.
+Fixed-grid multi-chunk ray tracing. One storage buffer of concatenated chunk bytes, and one directory buffer mapping grid position to chunk offset. A single WGSL kernel walks the tree per chunk and steps between chunks via directory lookups.
 
 ### Ray Tracing
 
@@ -324,7 +324,7 @@ Entry (8 bytes):
 
 Beyond the fixed-grid renderer, the world grows to a clipmap so far-away chunks are cheap and the addressable space is unbounded.
 
-Once ranges get this big, pure ray tracing stops being the right primary. Even with the coarse occupancy bitmask, a ray that has to trudge across every empty chunk in the frustum before it hits anything is expensive, and the cost scales with view distance rather than with what's actually visible. The plan is to rasterize a depth prepass from a coarse proxy geometry (typically the coarsest LOD chunk faces) and start each pixel's ray from that depth. Every ray then only has to refine the last bit of distance against the fine tree. The tracing techniques below (ancestor stack, coarse occupancy, octant mirroring) apply to that refinement step just as well as to full traversal.
+Once ranges get this big, pure ray tracing stops being the right primary. Even with the coarse occupancy bitmask, a ray that crosses every empty chunk in the frustum before hitting anything is expensive. The cost scales with view distance rather than with what's actually visible. The plan is to rasterize a depth prepass from a coarse proxy geometry (typically the coarsest LOD chunk faces) and start each pixel's ray from that depth. Every ray then only has to refine the last bit of distance against the fine tree. The tracing techniques below (ancestor stack, coarse occupancy, octant mirroring) apply to that refinement step just as well as to full traversal.
 
 - 11 levels (0-10) covering the i32 coord space.
 - Level 0 is the coarsest, level 10 is the finest. Same convention as the chunk tree.
